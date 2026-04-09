@@ -1,9 +1,18 @@
 import requests
 import json
 
-def generate_answer_stream(query, context, model_name="llama3"):
+def generate_answer_stream(query, context, model_name="llama3", persona="Standard Tutor"):
+    persona_prompts = {
+        "Standard Tutor": "You are a helpful AI assistant with diagramming capabilities.",
+        "Explain Like I'm 5 (ELI5)": "You are a highly enthusiastic teacher. Explain the following concepts so simply that a 5-year-old child could understand them.",
+        "PhD Level": "You are a post-doctoral researcher. Explain the concepts using advanced terminology, deep insights, and academic rigor.",
+        "Analogy Mode": "You are an expert at analogies. Explain the concepts entirely by comparing them to everyday objects, events, or pop culture."
+    }
+    
+    selected_persona = persona_prompts.get(persona, persona_prompts["Standard Tutor"])
+
     prompt = f"""
-You are a helpful AI assistant with diagramming capabilities.
+{selected_persona}
 
 Answer ONLY from the context.
 If not found, say: Not found in document.
@@ -110,3 +119,165 @@ Quiz:
 
     except Exception as e:
         yield f"⚠️ Error generating quiz: {str(e)}"
+
+def generate_summary_stream(context, model_name="llama3"):
+    prompt = f"""
+You are a master summarizer. Read the following document context and provide a highly structured "Master Study Guide".
+Structure the guide with:
+1. 📌 TL;DR (3-4 bullet points)
+2. 📖 Detailed Summary (Split by key topics)
+3. 🔑 Key Terminology (Definitions)
+4. 🚀 Actionable Takeaways
+
+Context:
+{context}
+
+Summary:
+"""
+    try:
+        response = requests.post(
+            "http://localhost:11434/api/generate",
+            json={"model": model_name, "prompt": prompt, "stream": True},
+            stream=True
+        )
+        for line in response.iter_lines():
+            if line:
+                data = json.loads(line)
+                if "response" in data:
+                    yield data["response"]
+    except Exception as e:
+        yield f"⚠️ Error generating summary: {str(e)}"
+
+def generate_flashcards_stream(context, model_name="llama3"):
+    prompt = f"""
+Based on the following document context, create 5 high-quality flashcards for active recall.
+
+Format each card EXACTLY like this:
+Q: [Question]
+A: [Answer]
+---
+(Repeat 5 times)
+
+Rules:
+1. Keep questions challenging.
+2. Keep answers concise.
+
+Context:
+{context}
+
+Flashcards:
+"""
+    try:
+        response = requests.post(
+            "http://localhost:11434/api/generate",
+            json={"model": model_name, "prompt": prompt, "stream": True},
+            stream=True
+        )
+        for line in response.iter_lines():
+            if line:
+                data = json.loads(line)
+                if "response" in data:
+                    yield data["response"]
+    except Exception as e:
+        yield f"⚠️ Error generating flashcards: {str(e)}"
+
+def generate_mindmap_stream(context, model_name="llama3"):
+    prompt = f"""
+Create a comprehensive visual Mind Map of the following document context.
+You MUST output valid Mermaid mindmap syntax.
+
+CRITICAL RULES:
+1. Start with 'mindmap'
+2. Use indentation to show hierarchy.
+3. Keep node text very short (1-3 words).
+4. Do NOT use any parentheses or special characters in the nodes.
+5. Wrap the code in triple backticks with 'mermaid' tag.
+6. Provide a brief textual summary before the diagram.
+
+Example:
+```mermaid
+mindmap
+  Root Idea
+    Child 1
+      Grandchild A
+    Child 2
+```
+
+Context:
+{context}
+
+Response:
+"""
+    try:
+        response = requests.post(
+            "http://localhost:11434/api/generate",
+            json={"model": model_name, "prompt": prompt, "stream": True},
+            stream=True
+        )
+        for line in response.iter_lines():
+            if line:
+                data = json.loads(line)
+                if "response" in data:
+                    yield data["response"]
+    except Exception as e:
+        yield f"⚠️ Error generating mind map: {str(e)}"
+
+def generate_cheatsheet_stream(context, model_name="llama3"):
+    prompt = f"""
+Create a highly structured Markdown Table acting as a "Cheat Sheet" for the following document context.
+Extract exactly 10 of the most important terms, dates, or formulas.
+
+Table Format:
+| Key Concept / Term | Definition / Significance | Importance (High/Med/Low) |
+|---|---|---|
+
+Context:
+{context}
+
+Cheat Sheet:
+"""
+    try:
+        response = requests.post(
+            "http://localhost:11434/api/generate",
+            json={"model": model_name, "prompt": prompt, "stream": True},
+            stream=True
+        )
+        for line in response.iter_lines():
+            if line:
+                data = json.loads(line)
+                if "response" in data:
+                    yield data["response"]
+    except Exception as e:
+        yield f"⚠️ Error generating cheat sheet: {str(e)}"
+
+def generate_study_plan_stream(context, model_name="llama3"):
+    prompt = f"""
+You are an expert academic planner. Based on the following document context, generate a logical 5-Day Study Schedule.
+Break down the material so it is easy to consume.
+
+Format:
+### Day 1: [Topic Name]
+- **Focus**: [What to learn]
+- **Goal**: [What you should know by the end]
+
+(Repeat for 5 Days)
+Finally, add a short "Tips for Success" section.
+
+Context:
+{context}
+
+Study Plan:
+"""
+    try:
+        response = requests.post(
+            "http://localhost:11434/api/generate",
+            json={"model": model_name, "prompt": prompt, "stream": True},
+            stream=True
+        )
+        for line in response.iter_lines():
+            if line:
+                data = json.loads(line)
+                if "response" in data:
+                    yield data["response"]
+    except Exception as e:
+        yield f"⚠️ Error generating study plan: {str(e)}"
