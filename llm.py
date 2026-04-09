@@ -3,7 +3,7 @@ import json
 
 def generate_answer_stream(query, context, model_name="llama3", persona="Standard Tutor"):
     persona_prompts = {
-        "Standard Tutor": "You are a helpful AI assistant with diagramming capabilities.",
+        "Standard Tutor": "You are a helpful AI assistant.",
         "Explain Like I'm 5 (ELI5)": "You are a highly enthusiastic teacher. Explain the following concepts so simply that a 5-year-old child could understand them.",
         "PhD Level": "You are a post-doctoral researcher. Explain the concepts using advanced terminology, deep insights, and academic rigor.",
         "Analogy Mode": "You are an expert at analogies. Explain the concepts entirely by comparing them to everyday objects, events, or pop culture."
@@ -17,33 +17,6 @@ def generate_answer_stream(query, context, model_name="llama3", persona="Standar
 Answer ONLY from the context.
 If not found, say: Not found in document.
 
-If the answer involves processes, steps, or relationships, also provide a Mermaid.js diagram.
-
-CRITICAL MERMAID RULES:
-1. Wrap code in triple backtick blocks with mermaid language tag.
-2. Start with graph TD
-3. Use simple arrows: A --> B
-4. DO NOT use edge labels with pipes like -->|label|
-5. DO NOT use semicolons at end of lines
-6. DO NOT use parentheses () in any labels
-7. Keep all node labels inside square brackets []
-8. Keep labels short and simple, no special characters
-
-CORRECT example:
-```mermaid
-graph TD
-    A[Data Collection] --> B[Data Processing]
-    B --> C[Analysis]
-    C --> D[Results]
-```
-
-WRONG - never do this:
-- A -->|label|> B
-- A[Something (x)]
-- Lines ending with ;
-
-Provide the textual answer first, then the diagram.
-
 Context:
 {context}
 
@@ -55,23 +28,58 @@ Answer:
     try:
         response = requests.post(
             "http://localhost:11434/api/generate",
-            json={
-                "model": model_name,
-                "prompt": prompt,
-                "stream": True
-            },
+            json={"model": model_name, "prompt": prompt, "stream": True},
             stream=True
         )
-
         for line in response.iter_lines():
             if line:
                 data = json.loads(line)
                 if "response" in data:
                     yield data["response"]
-
     except Exception as e:
-        yield f"⚠️ Make sure Ollama is running (`ollama run {model_name}`). Error: {str(e)}"
+        yield f"⚠️ Error: {str(e)}"
 
+def generate_diagram_for_text_stream(text_context, model_name="llama3"):
+    prompt = f"""
+Read the following text block and generate ONLY a valid Mermaid.js diagram representing the relationships, steps, or structure described.
+
+CRITICAL MERMAID RULES:
+1. Wrap code in triple backtick blocks with mermaid language tag.
+2. Start with graph TD
+3. Use only alphanumeric characters for node IDs (e.g., A, B, Node1).
+4. For all nodes, use the format: NodeID[Label text here]
+5. Keep labels short and simple. DO NOT use special characters like ==, !=, (), or pipes | in IDs or labels. Replace them with words like "Equals" or "NotEquals".
+6. Use simple arrows: A --> B
+7. DO NOT use semicolons at end of lines.
+8. DO NOT use parentheses () or quotes in any labels.
+
+Example:
+```mermaid
+graph TD
+  A[Start] --> B[Process]
+  B --> C[Decision]
+  C --> D[Result Alpha]
+  C --> E[Result Beta]
+```
+
+Text to visualize:
+{text_context}
+
+Output ONLY the markdown block with the diagram code. No explanation.
+"""
+    try:
+        response = requests.post(
+            "http://localhost:11434/api/generate",
+            json={"model": model_name, "prompt": prompt, "stream": True},
+            stream=True
+        )
+        for line in response.iter_lines():
+            if line:
+                data = json.loads(line)
+                if "response" in data:
+                    yield data["response"]
+    except Exception as e:
+        yield f"```mermaid\ngraph TD\nA[Error] --> B[{str(e)}]\n```"
 
 def basic_chat(query):
     q = query.lower()
@@ -188,19 +196,20 @@ You MUST output valid Mermaid mindmap syntax.
 
 CRITICAL RULES:
 1. Start with 'mindmap'
-2. Use indentation to show hierarchy.
-3. Keep node text very short (1-3 words).
-4. Do NOT use any parentheses or special characters in the nodes.
-5. Wrap the code in triple backticks with 'mermaid' tag.
-6. Provide a brief textual summary before the diagram.
+2. You MUST have EXACTLY ONE root node at the first indentation level. Do NOT create multiple top-level concepts under 'mindmap'. Syntax will crash if there is more than 1 root.
+3. Use strict indentation (spaces) to show hierarchy under the single root node.
+4. Keep node text very short (1-3 words).
+5. Do NOT use any parentheses, quotes, or special characters in the nodes.
+6. Wrap the code in triple backticks with 'mermaid' tag.
+7. Provide a brief textual summary before the diagram.
 
 Example:
 ```mermaid
 mindmap
-  Root Idea
-    Child 1
-      Grandchild A
-    Child 2
+  StudyMaterial
+    Topic 1
+      Subtopic A
+    Topic 2
 ```
 
 Context:

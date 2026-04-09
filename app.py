@@ -4,8 +4,22 @@ import re
 import streamlit.components.v1 as components
 from text_processor import chunk_text
 from rag_faiss import create_index, search
-from llm import generate_answer_stream, basic_chat, generate_quiz_stream, generate_summary_stream, generate_flashcards_stream, generate_mindmap_stream, generate_cheatsheet_stream, generate_study_plan_stream, generate_quiz_evaluate_stream
+from llm import generate_answer_stream, basic_chat, generate_quiz_stream, generate_summary_stream, generate_flashcards_stream, generate_mindmap_stream, generate_cheatsheet_stream, generate_study_plan_stream, generate_quiz_evaluate_stream, generate_diagram_for_text_stream
 from utils import save_pdf, load_all_pdfs, list_pdfs, delete_pdf
+import socket
+import urllib.parse
+
+def get_network_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(('10.255.255.255', 1))
+        IP = s.getsockname()[0]
+    except Exception:
+        IP = '127.0.0.1'
+    finally:
+        s.close()
+    return IP
+
 
 # ---------------- CONFIG ---------------- #
 st.set_page_config(page_title="Study AI: Premium RAG", page_icon="🤖", layout="wide")
@@ -377,6 +391,15 @@ def stop_speech():
 # ---------------- SIDEBAR ---------------- #
 with st.sidebar:
     st.title("⚙️ Control Panel")
+    
+    st.subheader("🌐 Network Access")
+    network_url = f"http://{get_network_ip()}:8501"
+    st.caption("Access on mobile (same Wi-Fi):")
+    st.code(network_url)
+    
+    qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=150x150&data={urllib.parse.quote(network_url)}&color=bdc2ff&bgcolor=0b1326"
+    st.image(qr_url, width=150)
+    st.divider()
     
     st.subheader("Model Selection")
     model_choice = st.selectbox("LLM Model", ["llama3", "mistral", "gemma", "phi3"], index=0)
@@ -793,9 +816,19 @@ else:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
             
+            # Mermaid diagrams
+            mermaid_matches = list(re.finditer(r'```mermaid\n(.*?)\n```', msg.get("content", ""), re.DOTALL))
+            has_embedded_mermaid = len(mermaid_matches) > 0
+            
+            for m_match in mermaid_matches:
+                render_mermaid(m_match.group(1))
+
+            if "diagram_code" in msg:
+                render_mermaid(msg["diagram_code"])
+            
             # Action buttons for assistant messages
             if msg["role"] == "assistant":
-                vcol1, vcol2, vcol3, _ = st.columns([1, 1, 1, 3])
+                vcol1, vcol2, vcol3, dcol, _ = st.columns([1, 1, 1, 1.5, 2.5])
                 with vcol1:
                     if st.button("🔊 Read Aloud", key=f"voice_{i}"):
                         clean_voice = re.sub(r'```mermaid.*?```', '', msg["content"], flags=re.DOTALL)
@@ -806,11 +839,20 @@ else:
                 with vcol3:
                     clean_text = re.sub(r'```mermaid.*?```', '', msg["content"], flags=re.DOTALL).strip()
                     st.download_button("📋 Copy", data=clean_text, file_name=f"answer_{i}.txt", mime="text/plain", key=f"copy_{i}")
-
-            # Mermaid diagrams
-            mermaid_matches = re.findall(r'```mermaid\n(.*?)\n```', msg["content"], re.DOTALL)
-            for m_code in mermaid_matches:
-                render_mermaid(m_code)
+                with dcol:
+                    if not has_embedded_mermaid and "diagram_code" not in msg:
+                        if st.button("📊 Generate Diagram", key=f"diag_{i}", use_container_width=True):
+                            with st.spinner("🤖 Drawing diagram..."):
+                                diag_stream = list(generate_diagram_for_text_stream(msg["content"], model_name=model_choice))
+                                diag_text = "".join(diag_stream).strip()
+                                mermaid_match = re.search(r'```mermaid\s*\n(.*?)(?:```|$)', diag_text, re.DOTALL)
+                                if mermaid_match:
+                                    msg["diagram_code"] = mermaid_match.group(1).strip()
+                                elif diag_text.startswith("graph TD") or diag_text.startswith("flowchart") or diag_text.startswith("mindmap"):
+                                    msg["diagram_code"] = diag_text.replace("```", "").strip()
+                                else:
+                                    msg["diagram_code"] = "graph TD\nA[Error] --> B[Could not generate valid diagram]"
+                                st.rerun()
 
     query = st.chat_input("Ask about your documents...")
     
@@ -820,12 +862,12 @@ else:
             st.markdown(query)
 
         with st.chat_message("assistant"):
-            with st.spinner("Searching document context..."):
+            with st.spinner("🤖 Studying and thinking..."):
                 results = search(query, index, chunks)
                 context_str = "\n\n".join(results[:3])
             
-            stream_generator = generate_answer_stream(query, context_str, model_name=model_choice, persona=persona_choice)
-            final_answer = st.write_stream(stream_generator)
+                stream_generator = generate_answer_stream(query, context_str, model_name=model_choice, persona=persona_choice)
+                final_answer = st.write_stream(stream_generator)
             
             # Source Clip
             with st.expander("📎 Source Context (" + str(len(results[:3])) + " segments found)"):
@@ -835,10 +877,5 @@ else:
                     if idx < 2:
                         st.divider()
 
-            # Render diagrams
-            mermaid_matches = re.findall(r'```mermaid\n(.*?)\n```', final_answer, re.DOTALL)
-            for m_code in mermaid_matches:
-                render_mermaid(m_code)
-            
             st.session_state.messages.append({"role": "assistant", "content": final_answer})
             st.rerun()
