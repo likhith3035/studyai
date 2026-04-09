@@ -281,3 +281,34 @@ Study Plan:
                     yield data["response"]
     except Exception as e:
         yield f"⚠️ Error generating study plan: {str(e)}"
+
+def generate_quiz_evaluate_stream(quiz_text, user_answers, model_name="llama3"):
+    prompt = f"""
+You are an expert exam evaluator. A student took a quiz and provided their answers.
+
+Here is the quiz:
+{quiz_text}
+
+Here are the student's answers:
+{user_answers}
+
+Please:
+1. Grade each answer as ✅ Correct or ❌ Incorrect.
+2. For each incorrect answer, explain the correct answer briefly.
+3. At the end, give an overall score (e.g., "3/5") and provide 2-3 personalized study suggestions based on what the student got wrong.
+
+Evaluation:
+"""
+    try:
+        response = requests.post(
+            "http://localhost:11434/api/generate",
+            json={"model": model_name, "prompt": prompt, "stream": True},
+            stream=True
+        )
+        for line in response.iter_lines():
+            if line:
+                data = json.loads(line)
+                if "response" in data:
+                    yield data["response"]
+    except Exception as e:
+        yield f"⚠️ Error evaluating quiz: {str(e)}"
