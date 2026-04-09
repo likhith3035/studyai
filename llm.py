@@ -195,21 +195,25 @@ Create a comprehensive visual Mind Map of the following document context.
 You MUST output valid Mermaid mindmap syntax.
 
 CRITICAL RULES:
-1. Start with 'mindmap'
-2. You MUST have EXACTLY ONE root node at the first indentation level. Do NOT create multiple top-level concepts under 'mindmap'. Syntax will crash if there is more than 1 root.
-3. Use strict indentation (spaces) to show hierarchy under the single root node.
-4. Keep node text very short (1-3 words).
-5. Do NOT use any parentheses, quotes, or special characters in the nodes.
-6. Wrap the code in triple backticks with 'mermaid' tag.
-7. Provide a brief textual summary before the diagram.
+1. Start with the keyword 'mindmap' on its own line.
+2. You MUST have EXACTLY ONE root node at the first indentation level.
+3. Use only spaces for indentation (2-4 spaces per level).
+4. For EVERY node, use quotes to wrap the text: `  "Node Text"`
+5. Keep node text very short (1-3 words).
+6. STRICTLY FORBIDDEN: Do not use symbols like ':', '!', '=', '-', '•', '(', ')', '[', ']', ',', or hyphens inside the node quotes. Replace them with plain words.
+7. Wrap the code in triple backticks with 'mermaid' tag.
+8. Provide a brief textual summary before the diagram.
 
 Example:
 ```mermaid
 mindmap
-  StudyMaterial
-    Topic 1
-      Subtopic A
-    Topic 2
+  "Study Material"
+    "Data Types"
+      "Numeric"
+      "Text"
+    "Logic"
+      "Conditionals"
+      "Loops"
 ```
 
 Context:
