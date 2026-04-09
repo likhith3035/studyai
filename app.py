@@ -332,20 +332,65 @@ def sanitize_mermaid(code: str) -> str:
     return code
 
 def render_mermaid(code: str):
-    """Renders Mermaid code with graceful fallback if syntax is invalid."""
+    """Renders Mermaid code with high-res PNG download functionality."""
     clean_code = sanitize_mermaid(code)
     escaped_code = clean_code.replace('`', '\\`')
     components.html(
         f"""
-        <div id="mermaid-container"></div>
+        <div id="mermaid-outer" style="display:flex; flex-direction:column; align-items:center; gap:12px;">
+            <div id="mermaid-container"></div>
+            <button id="dl-btn" onclick="downloadPNG()" style="
+                display:none; 
+                background: rgba(59, 130, 246, 0.1);
+                border: 1px solid rgba(59, 130, 246, 0.3);
+                color: #60a5fa;
+                padding: 6px 14px;
+                border-radius: 20px;
+                cursor: pointer;
+                font-family: sans-serif;
+                font-size: 12px;
+                transition: all 0.3s;
+                backdrop-filter: blur(5px);
+            ">📥 Download PNG</button>
+        </div>
+        
         <script type="module">
             import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
             mermaid.initialize({{ startOnLoad: false, theme: 'dark' }});
+            
             const container = document.getElementById('mermaid-container');
+            const btn = document.getElementById('dl-btn');
             const code = `{escaped_code}`;
+            
+            window.downloadPNG = async () => {{
+                const svgElement = container.querySelector('svg');
+                if (!svgElement) return;
+                
+                const svgData = new XMLSerializer().serializeToString(svgElement);
+                const canvas = document.createElement("canvas");
+                const ctx = canvas.getContext("2d");
+                const img = new Image();
+                
+                img.onload = () => {{
+                    const scale = 2; 
+                    canvas.width = img.width * scale;
+                    canvas.height = img.height * scale;
+                    ctx.fillStyle = "#0b1326";
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                    
+                    const link = document.createElement("a");
+                    link.download = "study_ai_diagram.png";
+                    link.href = canvas.toDataURL("image/png");
+                    link.click();
+                }};
+                img.src = "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(svgData)));
+            }};
+
             try {{
                 const {{ svg }} = await mermaid.render('mermaid-diagram', code);
-                container.innerHTML = '<div style="display:flex;justify-content:center;">' + svg + '</div>';
+                container.innerHTML = svg;
+                btn.style.display = 'block';
             }} catch (e) {{
                 container.innerHTML = `
                     <div style="background:#1e293b; border:1px solid #334155; border-radius:8px; padding:16px; font-family:monospace; color:#94a3b8; font-size:13px; white-space:pre-wrap;">
@@ -354,8 +399,16 @@ def render_mermaid(code: str):
                     </div>`;
             }}
         </script>
+        <style>
+            #dl-btn:hover {{
+                background: rgba(59, 130, 246, 0.2);
+                border-color: rgba(59, 130, 246, 0.6);
+                transform: translateY(-1px);
+                box-shadow: 0 4px 12px rgba(59, 130, 246, 0.2);
+            }}
+        </script>
         """,
-        height=400,
+        height=450,
         scrolling=True
     )
 
