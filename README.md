@@ -90,3 +90,4 @@ streamlit run app.py
 ---
 
 *Built with ❤️ for students and researchers.*
+developer :- Likhiith
