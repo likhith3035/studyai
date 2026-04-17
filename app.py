@@ -5,7 +5,7 @@ import streamlit.components.v1 as components
 from text_processor import chunk_text
 from rag_faiss import create_index, search, search_legacy
 from llm import generate_answer_stream, generate_hybrid_answer_stream, classify_relevance, basic_chat, generate_quiz_stream, generate_summary_stream, generate_flashcards_stream, generate_mindmap_stream, generate_cheatsheet_stream, generate_study_plan_stream, generate_quiz_evaluate_stream, generate_diagram_for_text_stream
-from utils import save_pdf, load_all_pdfs, list_pdfs, delete_pdf
+from utils import save_document, load_all_documents, list_documents, delete_document
 import socket
 import urllib.parse
 
@@ -318,7 +318,7 @@ hr {
 # ---------------- HELPERS ---------------- #
 @st.cache_resource
 def load_rag():
-    text = load_all_pdfs()
+    text = load_all_documents()
     chunks = chunk_text(text)
     index = create_index(chunks)
     return chunks, index
@@ -550,40 +550,41 @@ if mode == "🛠️ Admin Space":
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        st.subheader("📤 Upload Documents")
-        files = st.file_uploader("Upload PDFs", type="pdf", accept_multiple_files=True)
+        st.subheader("📤 Upload Data")
+        st.caption("Supported formats: **PDF, JSON, TXT, MD**")
+        files = st.file_uploader("Upload Files", type=["pdf", "json", "txt", "md"], accept_multiple_files=True)
         if files:
             for f in files:
-                save_pdf(f)
+                save_document(f)
             st.success(f"✅ Saved {len(files)} files successfully.")
             st.cache_resource.clear()
         
         # Document stats
         st.divider()
         st.subheader("📊 Knowledge Base Stats")
-        pdfs = list_pdfs()
+        docs = list_documents()
         chunks_loaded, _ = load_rag()
-        st.metric("Total Documents", len(pdfs))
+        st.metric("Total Documents", len(docs))
         st.metric("Total Chunks Indexed", len(chunks_loaded) if chunks_loaded else 0)
 
     with col2:
         st.subheader("📁 Current Documents")
-        pdfs = list_pdfs()
-        if not pdfs:
-            st.info("No documents uploaded yet. Upload PDFs to get started!")
+        docs = list_documents()
+        if not docs:
+            st.info("No documents uploaded yet. Upload some files to get started!")
         else:
-            for pdf in pdfs:
+            for doc in docs:
                 cols = st.columns([4, 1])
-                cols[0].write(f"📄 {pdf}")
-                if cols[1].button("🗑️", key=f"del_{pdf}"):
-                    if delete_pdf(pdf):
-                        st.success(f"Deleted {pdf}")
+                cols[0].write(f"📄 {doc}")
+                if cols[1].button("🗑️", key=f"del_{doc}"):
+                    if delete_document(doc):
+                        st.success(f"Deleted {doc}")
                         st.cache_resource.clear()
                         st.rerun()
             st.divider()
             if st.button("🗑️ Delete All Documents", use_container_width=True):
-                for pdf in pdfs:
-                    delete_pdf(pdf)
+                for doc in docs:
+                    delete_document(doc)
                 st.cache_resource.clear()
                 st.rerun()
 
