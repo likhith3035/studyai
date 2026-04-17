@@ -321,6 +321,7 @@ def normalize_query(query):
     clean_query = re.sub(r'["\',?!]', '', query)
     q_lower = clean_query.lower()
     show_image = any(w in q_lower for w in ["pic", "pic ", "image", "photo", "show "])
+    is_plural = any(w in q_lower for w in ["faculty", "professors", "teachers", "staff", "list", "all"])
     
     expansions = {
         r"\bhod\b": "head of department"
@@ -331,7 +332,7 @@ def normalize_query(query):
     for k, v in expansions.items():
         expanded = re.sub(k, v, expanded)
         
-    return expanded, show_image
+    return expanded, show_image, is_plural
 
 def render_profile_card(meta, show_image=False):
     if not isinstance(meta, dict):
@@ -1083,7 +1084,7 @@ else:
 
         with st.chat_message("assistant"):
             with st.spinner("🤖 Studying and thinking..."):
-                expanded_query, show_image = normalize_query(query)
+                expanded_query, show_image, is_plural = normalize_query(query)
                 
                 # Get scored results from FAISS
                 if has_docs:
@@ -1104,6 +1105,8 @@ else:
                                 dedup_key = meta.get("name") or meta.get("profile_url")
                                 if not any((p.get("name") or p.get("profile_url")) == dedup_key for p in active_profiles):
                                     active_profiles.append(meta)
+                                    if not is_plural:
+                                        break
                 
                 for prof in active_profiles:
                     render_profile_card(prof, show_image)
