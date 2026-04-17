@@ -10,7 +10,8 @@ def create_index(chunks):
     if not chunks:
         return None
         
-    embeddings = model.encode(chunks)
+    texts = [c["text"] if isinstance(c, dict) else c for c in chunks]
+    embeddings = model.encode(texts)
     embeddings = np.array(embeddings).astype("float32")
     
     # L2-normalize embeddings so Inner Product = Cosine Similarity
@@ -27,7 +28,7 @@ def create_index(chunks):
 def search(query, index, chunks, k=5):
     """
     Search for relevant chunks and return results with cosine similarity scores.
-    Returns: List of (chunk_text, similarity_score) tuples, sorted by score descending.
+    Returns: List of (chunk_dict, similarity_score) tuples, sorted by score descending.
     Scores are 0.0 to 1.0 where 1.0 = perfect match.
     """
     if not chunks or index is None:
@@ -51,4 +52,4 @@ def search(query, index, chunks, k=5):
 def search_legacy(query, index, chunks, k=3):
     """Legacy search that returns only chunk text (for backward compatibility with quiz/summary/etc)."""
     scored_results = search(query, index, chunks, k)
-    return [chunk for chunk, score in scored_results]
+    return [chunk["text"] if isinstance(chunk, dict) else chunk for chunk, score in scored_results]

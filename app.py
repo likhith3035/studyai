@@ -316,10 +316,39 @@ hr {
 """, unsafe_allow_html=True)
 
 # ---------------- HELPERS ---------------- #
+def render_profile_card(meta):
+    if not isinstance(meta, dict):
+        return
+    if not any(k in meta for k in ["name", "image_url", "profile_url"]):
+        return
+        
+    st.markdown('''
+<div style="padding: 16px; border-radius: 12px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255,255,255,0.1); margin-bottom: 16px;">
+''', unsafe_allow_html=True)
+    
+    cols = st.columns([1, 4])
+    with cols[0]:
+        if "image_url" in meta:
+            st.image(meta["image_url"], width=120)
+        else:
+            st.markdown("<h3>👤</h3>", unsafe_allow_html=True)
+            
+    with cols[1]:
+        if "name" in meta:
+            st.subheader(meta["name"])
+        if "role" in meta:
+            st.markdown(f"**{meta['role']}**")
+        if "department" in meta:
+            st.caption(meta["department"])
+        if "profile_url" in meta:
+            st.link_button("View Profile", meta["profile_url"])
+            
+    st.markdown("</div>", unsafe_allow_html=True)
+
 @st.cache_resource
 def load_rag():
-    text = load_all_documents()
-    chunks = chunk_text(text)
+    docs = load_all_documents()
+    chunks = chunk_text(docs)
     index = create_index(chunks)
     return chunks, index
 
@@ -649,7 +678,7 @@ elif mode == "📚 Master Summary":
     else:
         if st.button("✨ Generate Study Guide", use_container_width=True):
             with st.spinner("Analyzing all documents for key insights..."):
-                full_context = "\n".join(chunks[:min(len(chunks), 40)])
+                full_context = "\n".join([c["text"] if isinstance(c, dict) else c for c in chunks[:min(len(chunks), 40)]])
                 with st.chat_message("assistant", avatar="📖"):
                     summary_gen = generate_summary_stream(full_context, model_name=model_choice, base_url=model_url)
                     final_summary = st.write_stream(summary_gen)
@@ -684,7 +713,7 @@ elif mode == "🗂️ Flashcard Center":
             if st.button("🚀 Generate New Flashcards", use_container_width=True):
                 with st.spinner("Crafting flashcards..."):
                     import random
-                    sample_context = "\n".join(random.sample(chunks, min(len(chunks), 15)))
+                    sample_context = "\n".join([c["text"] if isinstance(c, dict) else c for c in random.sample(chunks, min(len(chunks), 15))])
                     raw_cards = "".join(list(generate_flashcards_stream(sample_context, model_name=model_choice, base_url=model_url)))
                     
                     parsed = []
@@ -795,7 +824,7 @@ elif mode == "📝 Quiz Generator":
         if st.button("🚀 Generate New Quiz", use_container_width=True):
             with st.spinner("Analyzing notes and crafting questions..."):
                 import random
-                sample_context = "\n".join(random.sample(chunks, min(len(chunks), 10)))
+                sample_context = "\n".join([c["text"] if isinstance(c, dict) else c for c in random.sample(chunks, min(len(chunks), 10))])
                 raw_quiz = "".join(list(generate_quiz_stream(sample_context, model_name=model_choice, base_url=model_url)))
                 st.session_state.quiz_text = raw_quiz
                 st.rerun()
@@ -836,7 +865,7 @@ elif mode == "🧠 Mind Map Explorer":
         depth = st.slider("🔍 Depth (how many chunks to analyze)", 5, 30, 15)
         if st.button("🕸️ Generate Mind Map", use_container_width=True):
             with st.spinner("Extracting conceptual web..."):
-                full_context = "\n".join(chunks[:min(len(chunks), depth)])
+                full_context = "\n".join([c["text"] if isinstance(c, dict) else c for c in chunks[:min(len(chunks), depth)]])
                 with st.chat_message("assistant", avatar="🧠"):
                     map_gen = generate_mindmap_stream(full_context, model_name=model_choice, base_url=model_url)
                     final_answer = st.write_stream(map_gen)
@@ -860,7 +889,7 @@ elif mode == "📊 Cheat Sheet":
     else:
         if st.button("✨ Generate Cheat Sheet", use_container_width=True):
             with st.spinner("Compiling cheat sheet..."):
-                full_context = "\n".join(chunks[:min(len(chunks), 25)])
+                full_context = "\n".join([c["text"] if isinstance(c, dict) else c for c in chunks[:min(len(chunks), 25)]])
                 with st.chat_message("assistant", avatar="📊"):
                     sheet_gen = generate_cheatsheet_stream(full_context, model_name=model_choice, base_url=model_url)
                     final_sheet = st.write_stream(sheet_gen)
@@ -884,7 +913,7 @@ elif mode == "📅 Study Planner":
     else:
         if st.button("📅 Plan My Study Week", use_container_width=True):
             with st.spinner("Structuring curriculum..."):
-                full_context = "\n".join(chunks[:min(len(chunks), 30)])
+                full_context = "\n".join([c["text"] if isinstance(c, dict) else c for c in chunks[:min(len(chunks), 30)]])
                 with st.chat_message("assistant", avatar="📅"):
                     plan_gen = generate_study_plan_stream(full_context, model_name=model_choice, base_url=model_url)
                     final_plan = st.write_stream(plan_gen)
@@ -918,6 +947,8 @@ else:
     # Display Chat History
     for i, msg in enumerate(st.session_state.messages):
         with st.chat_message(msg["role"]):
+            if "profile_card" in msg and msg["profile_card"]:
+                render_profile_card(msg["profile_card"])
             st.markdown(msg["content"])
             
             # Mermaid diagrams
@@ -1011,6 +1042,18 @@ else:
                 # Classify relevance
                 source_type, high_chunks, all_chunks = classify_relevance(scored_results)
                 
+                # Check for metadata in the top hit
+                active_profile_meta = None
+                if scored_results:
+                    top_chunk, top_score = scored_results[0]
+                    if top_score >= 0.7 and isinstance(top_chunk, dict):
+                        meta = top_chunk.get("metadata", {})
+                        if any(k in meta for k in ["name", "image_url", "profile_url"]):
+                            active_profile_meta = meta
+                
+                if active_profile_meta:
+                    render_profile_card(active_profile_meta)
+                
                 # Generate hybrid answer
                 stream_generator = generate_hybrid_answer_stream(
                     query, scored_results,
@@ -1051,9 +1094,12 @@ else:
                             f'**Segment {idx+1}** — <span style="color:{score_color}; font-weight:600;">{score_pct}% match</span>',
                             unsafe_allow_html=True
                         )
-                        st.markdown(chunk)
+                        st.markdown(chunk.get("text", "") if isinstance(chunk, dict) else chunk)
                         if idx < len(scored_results[:5]) - 1:
                             st.divider()
 
-            st.session_state.messages.append({"role": "assistant", "content": final_answer, "source": source_type})
+            msg_meta = {"role": "assistant", "content": final_answer, "source": source_type}
+            if active_profile_meta:
+                msg_meta["profile_card"] = active_profile_meta
+            st.session_state.messages.append(msg_meta)
             st.rerun()

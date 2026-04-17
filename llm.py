@@ -101,8 +101,8 @@ def classify_relevance(scored_results):
         return "ai_generated", [], []
     
     high_relevance = [(chunk, score) for chunk, score in scored_results if score >= RELEVANCE_THRESHOLD]
-    all_chunks = [chunk for chunk, score in scored_results]
-    high_chunks = [chunk for chunk, score in high_relevance]
+    all_chunks = [chunk["text"] if isinstance(chunk, dict) else chunk for chunk, score in scored_results]
+    high_chunks = [chunk["text"] if isinstance(chunk, dict) else chunk for chunk, score in high_relevance]
     
     if len(high_relevance) == 0:
         return "ai_generated", [], all_chunks

@@ -25,9 +25,9 @@ def delete_document(filename):
     return False
 
 def load_all_documents():
-    text = ""
+    docs = []
     if not os.path.exists(DATA_PATH):
-        return text
+        return docs
 
     for file in os.listdir(DATA_PATH):
         if not file.lower().endswith(SUPPORTED_EXTENSIONS):
@@ -37,21 +37,30 @@ def load_all_documents():
         try:
             if file.lower().endswith('.pdf'):
                 with pdfplumber.open(file_path) as pdf:
+                    pdf_text = []
                     for page in pdf.pages:
                         page_text = page.extract_text()
                         if page_text:
-                            text += page_text + "\n"
+                            pdf_text.append(page_text)
+                    if pdf_text:
+                        docs.append({"text": "\n".join(pdf_text), "metadata": {"source": file}})
             
             elif file.lower().endswith('.json'):
                 with open(file_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    text += json.dumps(data, indent=2) + "\n"
+                    if isinstance(data, list):
+                        for item in data:
+                            if isinstance(item, dict) and "text" in item:
+                                docs.append({
+                                    "text": item["text"],
+                                    "metadata": item.get("metadata", {"source": file})
+                                })
                     
             elif file.lower().endswith(('.txt', '.md')):
                 with open(file_path, 'r', encoding='utf-8') as f:
-                    text += f.read() + "\n"
+                    docs.append({"text": f.read(), "metadata": {"source": file}})
                     
         except Exception as e:
             print(f"Error reading {file}: {e}")
 
-    return text
+    return docs
