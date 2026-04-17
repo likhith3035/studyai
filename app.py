@@ -3,8 +3,8 @@ import time
 import re
 import streamlit.components.v1 as components
 from text_processor import chunk_text
-from rag_faiss import create_index, search
-from llm import generate_answer_stream, basic_chat, generate_quiz_stream, generate_summary_stream, generate_flashcards_stream, generate_mindmap_stream, generate_cheatsheet_stream, generate_study_plan_stream, generate_quiz_evaluate_stream, generate_diagram_for_text_stream
+from rag_faiss import create_index, search, search_legacy
+from llm import generate_answer_stream, generate_hybrid_answer_stream, classify_relevance, basic_chat, generate_quiz_stream, generate_summary_stream, generate_flashcards_stream, generate_mindmap_stream, generate_cheatsheet_stream, generate_study_plan_stream, generate_quiz_evaluate_stream, generate_diagram_for_text_stream
 from utils import save_pdf, load_all_pdfs, list_pdfs, delete_pdf
 import socket
 import urllib.parse
@@ -454,8 +454,9 @@ with st.sidebar:
     st.image(qr_url, width=150)
     st.divider()
     
-    st.subheader("Model Selection")
-    model_choice = st.selectbox("LLM Model", ["llama3", "mistral", "gemma", "phi3"], index=0)
+    st.subheader("🤖 LLM Configuration")
+    model_url = st.text_input("LLM Server URL", value="http://127.0.0.1:1234", help="Ollama: http://localhost:11434 | LM Studio: http://127.0.0.1:1234")
+    model_choice = st.text_input("LLM Model Identifier", value="google/gemma-4-e4b", help="Example: llama3, gemma, or the full path from LM Studio")
 
     st.divider()
     mode = st.radio("App Mode", ["💬 User Chat", "📝 Quiz Generator", "📚 Master Summary", "🗂️ Flashcard Center", "🧠 Mind Map Explorer", "📊 Cheat Sheet", "📅 Study Planner", "🛠️ Admin Space"])
@@ -600,7 +601,7 @@ elif mode == "📚 Master Summary":
             with st.spinner("Analyzing all documents for key insights..."):
                 full_context = "\n".join(chunks[:min(len(chunks), 40)])
                 with st.chat_message("assistant", avatar="📖"):
-                    summary_gen = generate_summary_stream(full_context, model_name=model_choice)
+                    summary_gen = generate_summary_stream(full_context, model_name=model_choice, base_url=model_url)
                     final_summary = st.write_stream(summary_gen)
                     st.session_state.last_summary = final_summary
         
@@ -634,7 +635,7 @@ elif mode == "🗂️ Flashcard Center":
                 with st.spinner("Crafting flashcards..."):
                     import random
                     sample_context = "\n".join(random.sample(chunks, min(len(chunks), 15)))
-                    raw_cards = "".join(list(generate_flashcards_stream(sample_context, model_name=model_choice)))
+                    raw_cards = "".join(list(generate_flashcards_stream(sample_context, model_name=model_choice, base_url=model_url)))
                     
                     parsed = []
                     cards = raw_cards.split("---")
@@ -745,7 +746,7 @@ elif mode == "📝 Quiz Generator":
             with st.spinner("Analyzing notes and crafting questions..."):
                 import random
                 sample_context = "\n".join(random.sample(chunks, min(len(chunks), 10)))
-                raw_quiz = "".join(list(generate_quiz_stream(sample_context, model_name=model_choice)))
+                raw_quiz = "".join(list(generate_quiz_stream(sample_context, model_name=model_choice, base_url=model_url)))
                 st.session_state.quiz_text = raw_quiz
                 st.rerun()
         
@@ -770,7 +771,7 @@ elif mode == "📝 Quiz Generator":
             if st.button("🧠 Evaluate My Answers", use_container_width=True, disabled=not user_answers):
                 with st.spinner("Grading your quiz..."):
                     with st.chat_message("assistant", avatar="🎓"):
-                        eval_gen = generate_quiz_evaluate_stream(st.session_state.quiz_text, user_answers, model_name=model_choice)
+                        eval_gen = generate_quiz_evaluate_stream(st.session_state.quiz_text, user_answers, model_name=model_choice, base_url=model_url)
                         st.write_stream(eval_gen)
 
 # ---------------- MIND MAP EXPLORER ---------------- #
@@ -787,7 +788,7 @@ elif mode == "🧠 Mind Map Explorer":
             with st.spinner("Extracting conceptual web..."):
                 full_context = "\n".join(chunks[:min(len(chunks), depth)])
                 with st.chat_message("assistant", avatar="🧠"):
-                    map_gen = generate_mindmap_stream(full_context, model_name=model_choice)
+                    map_gen = generate_mindmap_stream(full_context, model_name=model_choice, base_url=model_url)
                     final_answer = st.write_stream(map_gen)
                     st.session_state.last_mindmap = final_answer
                     
@@ -811,7 +812,7 @@ elif mode == "📊 Cheat Sheet":
             with st.spinner("Compiling cheat sheet..."):
                 full_context = "\n".join(chunks[:min(len(chunks), 25)])
                 with st.chat_message("assistant", avatar="📊"):
-                    sheet_gen = generate_cheatsheet_stream(full_context, model_name=model_choice)
+                    sheet_gen = generate_cheatsheet_stream(full_context, model_name=model_choice, base_url=model_url)
                     final_sheet = st.write_stream(sheet_gen)
                     st.session_state.last_cheatsheet = final_sheet
         
@@ -835,7 +836,7 @@ elif mode == "📅 Study Planner":
             with st.spinner("Structuring curriculum..."):
                 full_context = "\n".join(chunks[:min(len(chunks), 30)])
                 with st.chat_message("assistant", avatar="📅"):
-                    plan_gen = generate_study_plan_stream(full_context, model_name=model_choice)
+                    plan_gen = generate_study_plan_stream(full_context, model_name=model_choice, base_url=model_url)
                     final_plan = st.write_stream(plan_gen)
                     st.session_state.last_plan = final_plan
         
@@ -860,9 +861,9 @@ else:
         st.session_state.messages = []
 
     chunks, index = load_rag()
-    if not chunks:
-        st.warning("⚠️ No documents mapped. Please ask the Admin to upload PDFs.")
-        st.stop()
+    has_docs = bool(chunks)
+    if not has_docs:
+        st.info("💡 No college documents uploaded yet. I'll answer using AI knowledge. Upload PDFs in Admin Space for college-specific answers.")
 
     # Display Chat History
     for i, msg in enumerate(st.session_state.messages):
@@ -896,7 +897,7 @@ else:
                     if not has_embedded_mermaid and "diagram_code" not in msg:
                         if st.button("📊 Generate Diagram", key=f"diag_{i}", use_container_width=True):
                             with st.spinner("🤖 Drawing diagram..."):
-                                diag_stream = list(generate_diagram_for_text_stream(msg["content"], model_name=model_choice))
+                                diag_stream = list(generate_diagram_for_text_stream(msg["content"], model_name=model_choice, base_url=model_url))
                                 diag_text = "".join(diag_stream).strip()
                                 mermaid_match = re.search(r'```mermaid\s*\n(.*?)(?:```|$)', diag_text, re.DOTALL)
                                 if mermaid_match:
@@ -907,7 +908,7 @@ else:
                                     msg["diagram_code"] = "graph TD\nA[Error] --> B[Could not generate valid diagram]"
                                 st.rerun()
 
-    query = st.chat_input("Ask about your documents...")
+    query = st.chat_input("Ask anything — college topics or general questions...")
     
     if query:
         st.session_state.messages.append({"role": "user", "content": query})
@@ -916,19 +917,58 @@ else:
 
         with st.chat_message("assistant"):
             with st.spinner("🤖 Studying and thinking..."):
-                results = search(query, index, chunks)
-                context_str = "\n\n".join(results[:3])
-            
-                stream_generator = generate_answer_stream(query, context_str, model_name=model_choice, persona=persona_choice)
+                # Get scored results from FAISS
+                if has_docs:
+                    scored_results = search(query, index, chunks)
+                else:
+                    scored_results = []
+                
+                # Classify relevance
+                source_type, high_chunks, all_chunks = classify_relevance(scored_results)
+                
+                # Generate hybrid answer
+                stream_generator = generate_hybrid_answer_stream(
+                    query, scored_results,
+                    model_name=model_choice, base_url=model_url, persona=persona_choice
+                )
                 final_answer = st.write_stream(stream_generator)
             
-            # Source Clip
-            with st.expander("📎 Source Context (" + str(len(results[:3])) + " segments found)"):
-                for idx, r in enumerate(results[:3]):
-                    st.markdown(f"**Segment {idx+1}:**")
-                    st.markdown(r)
-                    if idx < 2:
-                        st.divider()
+            # Source Badge
+            if source_type == "college_data":
+                st.markdown(
+                    '<div style="display:inline-block; background:rgba(59,130,246,0.15); border:1px solid rgba(59,130,246,0.3); '
+                    'color:#60a5fa; padding:4px 14px; border-radius:20px; font-size:12px; margin-top:8px;">'
+                    '🏫 Based on College Data</div>',
+                    unsafe_allow_html=True
+                )
+            elif source_type == "ai_generated":
+                st.markdown(
+                    '<div style="display:inline-block; background:rgba(168,85,247,0.15); border:1px solid rgba(168,85,247,0.3); '
+                    'color:#c084fc; padding:4px 14px; border-radius:20px; font-size:12px; margin-top:8px;">'
+                    '🤖 Generated by our AI for better understanding</div>',
+                    unsafe_allow_html=True
+                )
+            else:
+                st.markdown(
+                    '<div style="display:inline-block; background:rgba(45,212,191,0.15); border:1px solid rgba(45,212,191,0.3); '
+                    'color:#2dd4bf; padding:4px 14px; border-radius:20px; font-size:12px; margin-top:8px;">'
+                    '🔀 College Data + AI Enhanced</div>',
+                    unsafe_allow_html=True
+                )
+            
+            # Source Context with Relevance Scores
+            if scored_results:
+                with st.expander("📎 Source Context (" + str(len(scored_results[:5])) + " segments found)"):
+                    for idx, (chunk, score) in enumerate(scored_results[:5]):
+                        score_pct = round(score * 100)
+                        score_color = "#22c55e" if score >= 0.7 else "#f59e0b" if score >= 0.4 else "#ef4444"
+                        st.markdown(
+                            f'**Segment {idx+1}** — <span style="color:{score_color}; font-weight:600;">{score_pct}% match</span>',
+                            unsafe_allow_html=True
+                        )
+                        st.markdown(chunk)
+                        if idx < len(scored_results[:5]) - 1:
+                            st.divider()
 
-            st.session_state.messages.append({"role": "assistant", "content": final_answer})
+            st.session_state.messages.append({"role": "assistant", "content": final_answer, "source": source_type})
             st.rerun()
