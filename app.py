@@ -5,7 +5,7 @@ import streamlit.components.v1 as components
 from text_processor import chunk_text
 from rag_faiss import create_index, search, search_legacy
 from llm import generate_answer_stream, generate_hybrid_answer_stream, classify_relevance, basic_chat, generate_quiz_stream, generate_summary_stream, generate_flashcards_stream, generate_mindmap_stream, generate_cheatsheet_stream, generate_study_plan_stream, generate_quiz_evaluate_stream, generate_diagram_for_text_stream
-from utils import save_document, load_all_documents, list_documents, delete_document
+from utils import save_document, load_all_documents, list_documents, delete_document, get_document_metadata, get_document_preview
 import socket
 import urllib.parse
 
@@ -648,17 +648,43 @@ if mode == "🛠️ Admin Space":
     with col2:
         st.subheader("📁 Current Documents")
         docs = list_documents()
+        
+        # Aggregate chunks per file to show stats cleanly
+        chunk_counts = {}
+        if chunks_loaded:
+            for c in chunks_loaded:
+                src = c.get("metadata", {}).get("source") if isinstance(c, dict) else None
+                if src:
+                    chunk_counts[src] = chunk_counts.get(src, 0) + 1
+                    
         if not docs:
             st.info("No documents uploaded yet. Upload some files to get started!")
         else:
+            import datetime
             for doc in docs:
-                cols = st.columns([4, 1])
-                cols[0].write(f"📄 {doc}")
-                if cols[1].button("🗑️", key=f"del_{doc}"):
-                    if delete_document(doc):
-                        st.success(f"Deleted {doc}")
-                        st.cache_resource.clear()
-                        st.rerun()
+                meta = get_document_metadata(doc)
+                if not meta: continue
+                
+                dt = datetime.datetime.fromtimestamp(meta["upload_time"])
+                time_str = dt.strftime("%d %b %Y, %I:%M %p")
+                
+                icon = "📄" if meta["file_type"] == "pdf" else "🧩" if meta["file_type"] == "json" else "📝"
+                chunks_in_file = chunk_counts.get(doc, 0)
+                
+                with st.expander(f"{icon} {doc}"):
+                    st.caption(f"**Uploaded:** {time_str}  •  **Chunks Index:** {chunks_in_file}")
+                    
+                    preview = get_document_preview(doc)
+                    if meta["file_type"] == "json" and isinstance(preview, (dict, list)):
+                        st.json(preview)
+                    else:
+                        st.text_area("Preview (First 2000 chars)", value=str(preview), height=200, disabled=True)
+                        
+                    if st.button("🗑️ Delete", key=f"del_{doc}"):
+                        if delete_document(doc):
+                            st.success(f"Deleted {doc}")
+                            st.cache_resource.clear()
+                            st.rerun()
             st.divider()
             if st.button("🗑️ Delete All Documents", use_container_width=True):
                 for doc in docs:

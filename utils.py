@@ -64,3 +64,51 @@ def load_all_documents():
             print(f"Error reading {file}: {e}")
 
     return docs
+
+def get_document_metadata(filename):
+    file_path = os.path.join(DATA_PATH, filename)
+    if not os.path.exists(file_path):
+        return None
+        
+    stat = os.stat(file_path)
+    # Get modified time (behaves identically to upload time here)
+    upload_time = stat.st_mtime
+    
+    file_type = "pdf"
+    if filename.lower().endswith(".json"): file_type = "json"
+    elif filename.lower().endswith((".txt", ".md")): file_type = "txt"
+    
+    return {
+        "file_name": filename,
+        "upload_time": upload_time,
+        "file_type": file_type,
+        "file_path": file_path
+    }
+
+def get_document_preview(filename):
+    file_path = os.path.join(DATA_PATH, filename)
+    if not os.path.exists(file_path):
+        return None
+        
+    try:
+        if filename.lower().endswith('.pdf'):
+            with pdfplumber.open(file_path) as pdf:
+                preview = []
+                for i, page in enumerate(pdf.pages[:2]): # Preview first 2 pages
+                    text = page.extract_text()
+                    if text: preview.append(f"--- PAGE {i+1} ---\n{text}")
+                return "\n\n".join(preview) if preview else "No readable text found."
+                
+        elif filename.lower().endswith('.json'):
+            with open(file_path, 'r', encoding='utf-8') as f:
+                return json.load(f) # Return dict for st.json()
+                
+        elif filename.lower().endswith(('.txt', '.md')):
+            with open(file_path, 'r', encoding='utf-8') as f:
+                # Preview up to 2000 chars to avoid memory bloat
+                content = f.read(2000)
+                if len(content) == 2000:
+                    content += "\n...[Content Truncated]..."
+                return content
+    except Exception as e:
+        return f"Error loading preview: {str(e)}"
