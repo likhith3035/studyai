@@ -8,6 +8,8 @@ from llm import generate_answer_stream, generate_hybrid_answer_stream, classify_
 from utils import save_document, load_all_documents, list_documents, delete_document, get_document_metadata, get_document_preview
 import socket
 import urllib.parse
+import pandas as pd
+import io
 
 def get_network_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -323,6 +325,12 @@ def normalize_query(query):
     show_image = any(w in q_lower for w in ["pic", "pic ", "image", "photo", "show "])
     is_plural = any(w in q_lower for w in ["faculty", "professors", "teachers", "staff", "list", "all"])
     
+    intent_type = "text"
+    if any(w in q_lower for w in ["compare", "difference", "vs", "comparison"]):
+        intent_type = "table"
+    elif is_plural:
+        intent_type = "list"
+    
     expansions = {
         r"\bhod\b": "head of department"
         # Removing drastic acronym expansions to prevent semantic drift
@@ -332,7 +340,41 @@ def normalize_query(query):
     for k, v in expansions.items():
         expanded = re.sub(k, v, expanded)
         
-    return expanded, show_image, is_plural
+    return expanded, show_image, is_plural, intent_type
+
+def extract_and_parse_markdown_table(text):
+    lines = text.strip().split('\n')
+    table_lines, other_lines = [], []
+    in_table = False
+    
+    for line in lines:
+        if '|' in line and (line.strip().startswith('|') or line.strip().endswith('|') or '-|-' in line):
+            table_lines.append(line.strip())
+            in_table = True
+        else:
+            if in_table and line.strip() == '':
+                continue
+            other_lines.append(line)
+            
+    if len(table_lines) < 3:
+        return None, text
+        
+    try:
+        csv_data = []
+        for t_line in table_lines:
+            trimmed = t_line.strip()
+            if trimmed.startswith('|'): trimmed = trimmed[1:]
+            if trimmed.endswith('|'): trimmed = trimmed[:-1]
+            if set(trimmed.replace('|','').replace('-','').replace(' ','').replace(':', '')) == set():
+                continue
+            cols = [col.strip().replace('"', '""') for col in trimmed.split('|')]
+            csv_data.append(','.join(f'"{col}"' for col in cols))
+            
+        csv_str = '\n'.join(csv_data)
+        df = pd.read_csv(io.StringIO(csv_str))
+        return df, '\n'.join(other_lines)
+    except Exception as e:
+        return None, text
 
 def render_profile_card(meta, show_image=False):
     if not isinstance(meta, dict):
@@ -1000,7 +1042,10 @@ else:
                     render_profile_card(p, msg.get("show_image", False))
             elif "profile_card" in msg and msg["profile_card"]: # backwards compat
                 render_profile_card(msg["profile_card"], msg.get("show_image", False))
+                
             st.markdown(msg["content"])
+            if msg.get("tableJSON") is not None:
+                st.table(pd.read_json(io.StringIO(msg["tableJSON"])))
             
             # Mermaid diagrams
             mermaid_matches = list(re.finditer(r'```mermaid\n(.*?)\n```', msg.get("content", ""), re.DOTALL))
@@ -1084,7 +1129,7 @@ else:
 
         with st.chat_message("assistant"):
             with st.spinner("🤖 Studying and thinking..."):
-                expanded_query, show_image, is_plural = normalize_query(query)
+                expanded_query, show_image, is_plural, intent_type = normalize_query(query)
                 
                 # Get scored results from FAISS
                 if has_docs:
@@ -1135,12 +1180,23 @@ else:
                 for prof in active_profiles:
                     render_profile_card(prof, show_image)
                 
-                # Generate hybrid answer using original original query (but context is drawn from expanded search)
+                # Generate hybrid answer using original query
                 stream_generator = generate_hybrid_answer_stream(
                     query, scored_results,
-                    model_name=model_choice, base_url=model_url, persona=persona_choice
+                    model_name=model_choice, base_url=model_url, persona=persona_choice,
+                    intent_type=intent_type
                 )
-                final_answer = st.write_stream(stream_generator)
+                
+                # If table logic is required, we cannot natively stream the raw table while building pandas
+                if intent_type == "table":
+                    full_text = "".join(stream_generator)
+                    df, remaining_text = extract_and_parse_markdown_table(full_text)
+                    st.markdown(remaining_text)
+                    if df is not None:
+                        st.table(df)
+                    final_answer = remaining_text
+                else:
+                    final_answer = st.write_stream(stream_generator)
             
             # Source Badge
             if source_type == "college_data":
@@ -1182,5 +1238,7 @@ else:
             msg_meta = {"role": "assistant", "content": final_answer, "source": source_type, "show_image": show_image}
             if active_profiles:
                 msg_meta["profile_cards"] = active_profiles
+            if intent_type == "table" and df is not None:
+                msg_meta["tableJSON"] = df.to_json()
             st.session_state.messages.append(msg_meta)
             st.rerun()

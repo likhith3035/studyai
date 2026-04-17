@@ -112,7 +112,7 @@ def classify_relevance(scored_results):
         return "mixed", high_chunks, all_chunks
 
 
-def generate_hybrid_answer_stream(query, scored_results, model_name="llama3", base_url="http://localhost:11434", persona="Standard Tutor"):
+def generate_hybrid_answer_stream(query, scored_results, model_name="llama3", base_url="http://localhost:11434", persona="Standard Tutor", intent_type="text"):
     """
     Hybrid answering system that intelligently routes between:
     - Case 1: College data (high relevance)
@@ -129,6 +129,13 @@ def generate_hybrid_answer_stream(query, scored_results, model_name="llama3", ba
     selected_persona = persona_prompts.get(persona, persona_prompts["Standard Tutor"])
     source_type, high_chunks, all_chunks = classify_relevance(scored_results)
     
+    # Inject Structural Clamps
+    format_clamp = ""
+    if intent_type == "table":
+        format_clamp = "\nIMPORTANT: Structure your entire response exclusively as a Markdown table to allow for direct comparison. Do not include introductory text."
+    elif intent_type == "list":
+        format_clamp = "\nIMPORTANT: Please structure the details using clear bullet points or numbered lists."
+    
     if source_type == "college_data":
         context = "\n\n".join(high_chunks)
         prompt = f"""
@@ -144,6 +151,7 @@ College Data Context:
 Student's Question:
 {query}
 
+{format_clamp}
 Provide a clear, well-structured answer based on the college data above:
 """
     
@@ -169,6 +177,7 @@ Be conversational and supportive. Never say "not found" or "I don't have informa
 Student's Question:
 {query}
 
+{format_clamp}
 Provide a thorough, educational answer using your knowledge:
 """
     
@@ -188,7 +197,8 @@ College Data (use for specific institutional facts):
 Student's Question:
 {query}
 
-Provide a complete, unified answer combining college-specific data and your own knowledge where needed:
+{format_clamp}
+Provide your comprehensive answer below:
 """
     
     yield from call_llm_stream(prompt, model_name, base_url)
