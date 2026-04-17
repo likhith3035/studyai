@@ -1105,8 +1105,32 @@ else:
                                 dedup_key = meta.get("name") or meta.get("profile_url")
                                 if not any((p.get("name") or p.get("profile_url")) == dedup_key for p in active_profiles):
                                     active_profiles.append(meta)
-                                    if not is_plural:
-                                        break
+                
+                # If singular identity requested, perform Lexical Re-Ranking (BM25-Lite) on top FAISS candidates
+                if active_profiles and not is_plural:
+                    query_words = set(re.sub(r'[^\w\s]', '', query).lower().split())
+                    best_match = active_profiles[0]
+                    max_overlap = -1
+                    
+                    for prof in active_profiles:
+                        prof_text = f"{prof.get('name','')} {prof.get('role','')} {prof.get('department','')} {prof.get('specialization','')} ".lower()
+                        prof_words = set(prof_text.split())
+                        
+                        overlap = len(query_words.intersection(prof_words))
+                        
+                        # Heavy lexical boost for vital hierarchy keywords
+                        if "hod" in query_words and ("hod" in prof.get("role", "").lower() or "head" in prof.get("role", "").lower()):
+                            overlap += 10
+                        if "principal" in query_words and "principal" in prof.get("role", "").lower():
+                            overlap += 10
+                        if "director" in query_words and "director" in prof.get("role", "").lower():
+                            overlap += 10
+                            
+                        if overlap > max_overlap:
+                            max_overlap = overlap
+                            best_match = prof
+                            
+                    active_profiles = [best_match]
                 
                 for prof in active_profiles:
                     render_profile_card(prof, show_image)
