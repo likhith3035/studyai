@@ -86,7 +86,7 @@ Answer:
 # HYBRID RAG SYSTEM: College Expert + AI Knowledge Combined
 # ============================================================
 
-RELEVANCE_THRESHOLD = 0.45
+RELEVANCE_THRESHOLD = 0.25
 
 def classify_relevance(scored_results):
     """
