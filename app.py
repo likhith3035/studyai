@@ -547,6 +547,55 @@ if mode == "🛠️ Admin Space":
     st.markdown("<h1 class='premium-title'>🛠️ Admin Space</h1>", unsafe_allow_html=True)
     st.markdown("<p class='subtitle-text'>Manage your documents and knowledge base</p>", unsafe_allow_html=True)
 
+    st.divider()
+    
+    st.subheader("📝 Raw JSON Ingestion")
+    st.caption("Paste structured JSON arrays to manually inject specific college knowledge (e.g., faculty names, lab hours, rules).")
+    
+    json_example = '''[
+  {
+    "text": "Dr Rajasekhar Reddy A is the Head of the CSE department.",
+    "metadata": { "type": "faculty", "name": "Rajasekhar Reddy A", "role": "HOD" }
+  }
+]'''
+    
+    raw_json_input = st.text_area("JSON Input", value="", placeholder=json_example, height=200)
+    
+    if st.button("🚀 Ingest JSON Data", use_container_width=True):
+        if not raw_json_input.strip():
+            st.error("❌ Input cannot be empty.")
+        else:
+            try:
+                import json
+                import datetime
+                parsed_data = json.loads(raw_json_input)
+                
+                if not isinstance(parsed_data, list):
+                    st.error("❌ Invalid format: JSON must be a list containing objects.")
+                else:
+                    valid = True
+                    for i, item in enumerate(parsed_data):
+                        if not isinstance(item, dict) or "text" not in item:
+                            st.error(f"❌ Item at index {i} is missing the required 'text' key.")
+                            valid = False
+                            break
+                    
+                    if valid:
+                        import os
+                        os.makedirs("data", exist_ok=True)
+                        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                        filename = f"knowledge_drop_{timestamp}.json"
+                        filepath = os.path.join("data", filename)
+                        
+                        with open(filepath, "w", encoding="utf-8") as f:
+                            json.dump(parsed_data, f, indent=2)
+                        
+                        st.success(f"✅ Successfully ingested {len(parsed_data)} knowledge items! Saved as {filename}.")
+                        st.cache_resource.clear()
+                        st.rerun()
+            except json.JSONDecodeError as e:
+                st.error(f"❌ Invalid JSON format: {str(e)}")
+
     col1, col2 = st.columns([1, 1])
     
     with col1:
