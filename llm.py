@@ -1,7 +1,61 @@
 import requests
 import json
 
-def generate_answer_stream(query, context, model_name="llama3", persona="Standard Tutor"):
+def call_llm_stream(prompt, model_name, base_url):
+    """
+    Centralized helper to call different local LLM APIs (Ollama vs OpenAI/LM Studio).
+    """
+    # Auto-detect format based on port
+    is_openai_format = ":1234" in base_url or "/v1" in base_url
+    
+    try:
+        if is_openai_format:
+            # OpenAI / LM Studio Chat Completions format
+            url = f"{base_url.rstrip('/')}/v1/chat/completions"
+            payload = {
+                "model": model_name,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": True,
+                "temperature": 0.7
+            }
+            response = requests.post(url, json=payload, stream=True, timeout=10)
+            response.raise_for_status()
+
+            for line in response.iter_lines():
+                if line:
+                    line_str = line.decode('utf-8').strip()
+                    if line_str.startswith("data: "):
+                        data_content = line_str[6:]
+                        if data_content == "[DONE]":
+                            break
+                        data = json.loads(data_content)
+                        if "choices" in data and len(data["choices"]) > 0:
+                            content = data["choices"][0].get("delta", {}).get("content", "")
+                            if content:
+                                yield content
+        else:
+            # Ollama Generate format
+            url = f"{base_url.rstrip('/')}/api/generate"
+            payload = {
+                "model": model_name,
+                "prompt": prompt,
+                "stream": True
+            }
+            response = requests.post(url, json=payload, stream=True, timeout=10)
+            response.raise_for_status()
+
+            for line in response.iter_lines():
+                if line:
+                    data = json.loads(line)
+                    if "response" in data:
+                        yield data["response"]
+                    if data.get("done"):
+                        break
+    except Exception as e:
+        yield f"⚠️ LLM Connection Error ({base_url}): {str(e)}"
+
+def generate_answer_stream(query, context, model_name="llama3", base_url="http://localhost:11434", persona="Standard Tutor"):
+    """Legacy function — kept for backward compatibility with quiz/summary modules."""
     persona_prompts = {
         "Standard Tutor": "You are a helpful AI assistant.",
         "Explain Like I'm 5 (ELI5)": "You are a highly enthusiastic teacher. Explain the following concepts so simply that a 5-year-old child could understand them.",
@@ -25,21 +79,116 @@ Question:
 
 Answer:
 """
-    try:
-        response = requests.post(
-            "http://localhost:11434/api/generate",
-            json={"model": model_name, "prompt": prompt, "stream": True},
-            stream=True
-        )
-        for line in response.iter_lines():
-            if line:
-                data = json.loads(line)
-                if "response" in data:
-                    yield data["response"]
-    except Exception as e:
-        yield f"⚠️ Error: {str(e)}"
+    yield from call_llm_stream(prompt, model_name, base_url)
 
-def generate_diagram_for_text_stream(text_context, model_name="llama3"):
+
+# ============================================================
+# HYBRID RAG SYSTEM: College Expert + AI Knowledge Combined
+# ============================================================
+
+RELEVANCE_THRESHOLD = 0.7
+
+def classify_relevance(scored_results):
+    """
+    Classify query relevance based on similarity scores.
+    
+    Returns:
+        source_type: "college_data" | "ai_generated" | "mixed"
+        high_relevance_chunks: list of chunks with score >= threshold
+        all_chunks: list of all chunk texts
+    """
+    if not scored_results:
+        return "ai_generated", [], []
+    
+    high_relevance = [(chunk, score) for chunk, score in scored_results if score >= RELEVANCE_THRESHOLD]
+    all_chunks = [chunk for chunk, score in scored_results]
+    high_chunks = [chunk for chunk, score in high_relevance]
+    
+    if len(high_relevance) == 0:
+        return "ai_generated", [], all_chunks
+    elif len(high_relevance) == len(scored_results):
+        return "college_data", high_chunks, all_chunks
+    else:
+        return "mixed", high_chunks, all_chunks
+
+
+def generate_hybrid_answer_stream(query, scored_results, model_name="llama3", base_url="http://localhost:11434", persona="Standard Tutor"):
+    """
+    Hybrid answering system that intelligently routes between:
+    - Case 1: College data (high relevance)
+    - Case 2: AI-generated knowledge (low/no relevance)
+    - Case 3: Mixed (some college data + AI enhancement)
+    """
+    persona_prompts = {
+        "Standard Tutor": "You are a helpful, friendly AI study assistant.",
+        "Explain Like I'm 5 (ELI5)": "You are a highly enthusiastic teacher. Explain concepts so simply that a 5-year-old child could understand them.",
+        "PhD Level": "You are a post-doctoral researcher. Explain concepts using advanced terminology, deep insights, and academic rigor.",
+        "Analogy Mode": "You are an expert at analogies. Explain concepts entirely by comparing them to everyday objects, events, or pop culture."
+    }
+    
+    selected_persona = persona_prompts.get(persona, persona_prompts["Standard Tutor"])
+    source_type, high_chunks, all_chunks = classify_relevance(scored_results)
+    
+    if source_type == "college_data":
+        context = "\n\n".join(high_chunks)
+        prompt = f"""
+{selected_persona}
+
+You are answering a student's question using VERIFIED college/institutional data.
+Answer the question based ONLY on the following retrieved college documents.
+Be clear, structured, and helpful. Do NOT add information that is not in the context.
+
+College Data Context:
+{context}
+
+Student's Question:
+{query}
+
+Provide a clear, well-structured answer based on the college data above:
+"""
+    
+    elif source_type == "ai_generated":
+        # Use any low-relevance context as optional hints, but primarily use general knowledge
+        hint_context = "\n".join(all_chunks[:2]) if all_chunks else ""
+        hint_section = f"\n(Note: Some loosely related content was found but may not directly answer the question: {hint_context[:300]}...)\n" if hint_context else ""
+        
+        prompt = f"""
+{selected_persona}
+
+A student asked a question that is NOT directly covered in the college database.
+Use your own knowledge to provide a helpful, accurate, and educational answer.
+Be conversational and supportive. Never say "not found" or "I don't have information".
+{hint_section}
+
+Student's Question:
+{query}
+
+Provide a thorough, educational answer using your knowledge:
+"""
+    
+    else:  # mixed
+        college_context = "\n\n".join(high_chunks)
+        prompt = f"""
+{selected_persona}
+
+A student asked a question that is PARTIALLY covered by college data.
+For parts that match the college data, answer strictly from that context.
+For parts not covered, use your general knowledge to provide a complete answer.
+Seamlessly combine both into a single, coherent, helpful response.
+
+College Data (use for specific institutional facts):
+{college_context}
+
+Student's Question:
+{query}
+
+Provide a complete, unified answer combining college-specific data and your own knowledge where needed:
+"""
+    
+    yield from call_llm_stream(prompt, model_name, base_url)
+
+
+def generate_diagram_for_text_stream(text_context, model_name="llama3", base_url="http://localhost:11434"):
     prompt = f"""
 Read the following text block and generate ONLY a valid Mermaid.js diagram representing the relationships, steps, or structure described.
 
@@ -67,23 +216,10 @@ Text to visualize:
 
 Output ONLY the markdown block with the diagram code. No explanation.
 """
-    try:
-        response = requests.post(
-            "http://localhost:11434/api/generate",
-            json={"model": model_name, "prompt": prompt, "stream": True},
-            stream=True
-        )
-        for line in response.iter_lines():
-            if line:
-                data = json.loads(line)
-                if "response" in data:
-                    yield data["response"]
-    except Exception as e:
-        yield f"```mermaid\ngraph TD\nA[Error] --> B[{str(e)}]\n```"
+    yield from call_llm_stream(prompt, model_name, base_url)
 
 def basic_chat(query):
     q = query.lower()
-
     if "hi" in q or "hello" in q:
         return "👋 Hello! How can I help you today?"
     elif "how are you" in q:
@@ -92,10 +228,9 @@ def basic_chat(query):
         return "🙏 You're welcome! Happy to help."
     elif "bye" in q:
         return "👋 Goodbye! Have a great day."
-
     return None
 
-def generate_quiz_stream(context, model_name="llama3"):
+def generate_quiz_stream(context, model_name="llama3", base_url="http://localhost:11434"):
     prompt = f"""
 You are an expert tutor. Based on the following document context, create a challenging 5-question Multiple Choice Quiz.
 For each question:
@@ -108,27 +243,9 @@ Context:
 
 Quiz:
 """
-    try:
-        response = requests.post(
-            "http://localhost:11434/api/generate",
-            json={
-                "model": model_name,
-                "prompt": prompt,
-                "stream": True
-            },
-            stream=True
-        )
+    yield from call_llm_stream(prompt, model_name, base_url)
 
-        for line in response.iter_lines():
-            if line:
-                data = json.loads(line)
-                if "response" in data:
-                    yield data["response"]
-
-    except Exception as e:
-        yield f"⚠️ Error generating quiz: {str(e)}"
-
-def generate_summary_stream(context, model_name="llama3"):
+def generate_summary_stream(context, model_name="llama3", base_url="http://localhost:11434"):
     prompt = f"""
 You are a master summarizer. Read the following document context and provide a highly structured "Master Study Guide".
 Structure the guide with:
@@ -142,21 +259,9 @@ Context:
 
 Summary:
 """
-    try:
-        response = requests.post(
-            "http://localhost:11434/api/generate",
-            json={"model": model_name, "prompt": prompt, "stream": True},
-            stream=True
-        )
-        for line in response.iter_lines():
-            if line:
-                data = json.loads(line)
-                if "response" in data:
-                    yield data["response"]
-    except Exception as e:
-        yield f"⚠️ Error generating summary: {str(e)}"
+    yield from call_llm_stream(prompt, model_name, base_url)
 
-def generate_flashcards_stream(context, model_name="llama3"):
+def generate_flashcards_stream(context, model_name="llama3", base_url="http://localhost:11434"):
     prompt = f"""
 Based on the following document context, create 5 high-quality flashcards for active recall.
 
@@ -175,21 +280,9 @@ Context:
 
 Flashcards:
 """
-    try:
-        response = requests.post(
-            "http://localhost:11434/api/generate",
-            json={"model": model_name, "prompt": prompt, "stream": True},
-            stream=True
-        )
-        for line in response.iter_lines():
-            if line:
-                data = json.loads(line)
-                if "response" in data:
-                    yield data["response"]
-    except Exception as e:
-        yield f"⚠️ Error generating flashcards: {str(e)}"
+    yield from call_llm_stream(prompt, model_name, base_url)
 
-def generate_mindmap_stream(context, model_name="llama3"):
+def generate_mindmap_stream(context, model_name="llama3", base_url="http://localhost:11434"):
     prompt = f"""
 Create a comprehensive visual Mind Map of the following document context.
 You MUST output valid Mermaid mindmap syntax.
@@ -201,7 +294,7 @@ CRITICAL RULES:
 4. For EVERY node, use quotes to wrap the text: `  "Node Text"`
 5. Keep node text very short (1-3 words).
 6. STRICTLY FORBIDDEN: Do not use symbols like ':', '!', '=', '-', '•', '(', ')', '[', ']', ',', or hyphens inside the node quotes. Replace them with plain words.
-7. Wrap the code in triple backticks with 'mermaid' tag.
+7. Wrap the code in triple backtick blocks with 'mermaid' tag.
 8. Provide a brief textual summary before the diagram.
 
 Example:
@@ -221,21 +314,9 @@ Context:
 
 Response:
 """
-    try:
-        response = requests.post(
-            "http://localhost:11434/api/generate",
-            json={"model": model_name, "prompt": prompt, "stream": True},
-            stream=True
-        )
-        for line in response.iter_lines():
-            if line:
-                data = json.loads(line)
-                if "response" in data:
-                    yield data["response"]
-    except Exception as e:
-        yield f"⚠️ Error generating mind map: {str(e)}"
+    yield from call_llm_stream(prompt, model_name, base_url)
 
-def generate_cheatsheet_stream(context, model_name="llama3"):
+def generate_cheatsheet_stream(context, model_name="llama3", base_url="http://localhost:11434"):
     prompt = f"""
 Create a highly structured Markdown Table acting as a "Cheat Sheet" for the following document context.
 Extract exactly 10 of the most important terms, dates, or formulas.
@@ -249,21 +330,9 @@ Context:
 
 Cheat Sheet:
 """
-    try:
-        response = requests.post(
-            "http://localhost:11434/api/generate",
-            json={"model": model_name, "prompt": prompt, "stream": True},
-            stream=True
-        )
-        for line in response.iter_lines():
-            if line:
-                data = json.loads(line)
-                if "response" in data:
-                    yield data["response"]
-    except Exception as e:
-        yield f"⚠️ Error generating cheat sheet: {str(e)}"
+    yield from call_llm_stream(prompt, model_name, base_url)
 
-def generate_study_plan_stream(context, model_name="llama3"):
+def generate_study_plan_stream(context, model_name="llama3", base_url="http://localhost:11434"):
     prompt = f"""
 You are an expert academic planner. Based on the following document context, generate a logical 5-Day Study Schedule.
 Break down the material so it is easy to consume.
@@ -281,21 +350,9 @@ Context:
 
 Study Plan:
 """
-    try:
-        response = requests.post(
-            "http://localhost:11434/api/generate",
-            json={"model": model_name, "prompt": prompt, "stream": True},
-            stream=True
-        )
-        for line in response.iter_lines():
-            if line:
-                data = json.loads(line)
-                if "response" in data:
-                    yield data["response"]
-    except Exception as e:
-        yield f"⚠️ Error generating study plan: {str(e)}"
+    yield from call_llm_stream(prompt, model_name, base_url)
 
-def generate_quiz_evaluate_stream(quiz_text, user_answers, model_name="llama3"):
+def generate_quiz_evaluate_stream(quiz_text, user_answers, model_name="llama3", base_url="http://localhost:11434"):
     prompt = f"""
 You are an expert exam evaluator. A student took a quiz and provided their answers.
 
@@ -312,16 +369,4 @@ Please:
 
 Evaluation:
 """
-    try:
-        response = requests.post(
-            "http://localhost:11434/api/generate",
-            json={"model": model_name, "prompt": prompt, "stream": True},
-            stream=True
-        )
-        for line in response.iter_lines():
-            if line:
-                data = json.loads(line)
-                if "response" in data:
-                    yield data["response"]
-    except Exception as e:
-        yield f"⚠️ Error evaluating quiz: {str(e)}"
+    yield from call_llm_stream(prompt, model_name, base_url)
