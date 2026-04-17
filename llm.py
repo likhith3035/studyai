@@ -148,6 +148,12 @@ Provide a clear, well-structured answer based on the college data above:
 """
     
     elif source_type == "ai_generated":
+        # Hard stop if they are explicitly asking for college directory data that we don't have
+        college_keywords = ["hod", "faculty", "professor", "department", "staff", "pic", "image"]
+        if any(k in query.lower() for k in college_keywords) and not high_chunks:
+            yield "No relevant college data found."
+            return
+            
         # Use any low-relevance context as optional hints, but primarily use general knowledge
         hint_context = "\n".join(all_chunks[:2]) if all_chunks else ""
         hint_section = f"\n(Note: Some loosely related content was found but may not directly answer the question: {hint_context[:300]}...)\n" if hint_context else ""

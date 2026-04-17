@@ -316,7 +316,25 @@ hr {
 """, unsafe_allow_html=True)
 
 # ---------------- HELPERS ---------------- #
-def render_profile_card(meta):
+def normalize_query(query):
+    q_lower = query.lower()
+    show_image = any(w in q_lower for w in ["pic", "pic ", "image", "photo", "show "])
+    
+    expansions = {
+        r"\bhod\b": "head of department",
+        r"\bcse\b": "computer science",
+        r"\bece\b": "electronics",
+        r"\bmech\b": "mechanical",
+        r"\bee\b": "electrical"
+    }
+    
+    expanded = q_lower
+    for k, v in expansions.items():
+        expanded = re.sub(k, v, expanded)
+        
+    return expanded, show_image
+
+def render_profile_card(meta, show_image=False):
     if not isinstance(meta, dict):
         return
     if not any(k in meta for k in ["name", "image_url", "profile_url"]):
@@ -328,7 +346,7 @@ def render_profile_card(meta):
     
     cols = st.columns([1, 4])
     with cols[0]:
-        if "image_url" in meta:
+        if "image_url" in meta and show_image:
             st.image(meta["image_url"], width=120)
         else:
             st.markdown("<h3>👤</h3>", unsafe_allow_html=True)
@@ -340,8 +358,12 @@ def render_profile_card(meta):
             st.markdown(f"**{meta['role']}**")
         if "department" in meta:
             st.caption(meta["department"])
+            
+        b_cols = st.columns([1, 1, 2])
         if "profile_url" in meta:
-            st.link_button("View Profile", meta["profile_url"])
+            b_cols[0].link_button("🔗 View Profile", meta["profile_url"], use_container_width=True)
+        if "image_url" in meta:
+            b_cols[1].link_button("🖼️ View Image", meta["image_url"], use_container_width=True)
             
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -973,8 +995,11 @@ else:
     # Display Chat History
     for i, msg in enumerate(st.session_state.messages):
         with st.chat_message(msg["role"]):
-            if "profile_card" in msg and msg["profile_card"]:
-                render_profile_card(msg["profile_card"])
+            if "profile_cards" in msg and msg["profile_cards"]:
+                for p in msg["profile_cards"]:
+                    render_profile_card(p, msg.get("show_image", False))
+            elif "profile_card" in msg and msg["profile_card"]: # backwards compat
+                render_profile_card(msg["profile_card"], msg.get("show_image", False))
             st.markdown(msg["content"])
             
             # Mermaid diagrams
@@ -1059,28 +1084,32 @@ else:
 
         with st.chat_message("assistant"):
             with st.spinner("🤖 Studying and thinking..."):
+                expanded_query, show_image = normalize_query(query)
+                
                 # Get scored results from FAISS
                 if has_docs:
-                    scored_results = search(query, index, chunks)
+                    scored_results = search(expanded_query, index, chunks)
                 else:
                     scored_results = []
                 
                 # Classify relevance
                 source_type, high_chunks, all_chunks = classify_relevance(scored_results)
                 
-                # Check for metadata in the top hit
-                active_profile_meta = None
+                # Check for metadata across top hits
+                active_profiles = []
                 if scored_results:
-                    top_chunk, top_score = scored_results[0]
-                    if top_score >= 0.7 and isinstance(top_chunk, dict):
-                        meta = top_chunk.get("metadata", {})
-                        if any(k in meta for k in ["name", "image_url", "profile_url"]):
-                            active_profile_meta = meta
+                    for chunk, score in scored_results[:4]:
+                        if score >= 0.65 and isinstance(chunk, dict):
+                            meta = chunk.get("metadata", {})
+                            if any(k in meta for k in ["name", "image_url", "profile_url"]):
+                                dedup_key = meta.get("name") or meta.get("profile_url")
+                                if not any((p.get("name") or p.get("profile_url")) == dedup_key for p in active_profiles):
+                                    active_profiles.append(meta)
                 
-                if active_profile_meta:
-                    render_profile_card(active_profile_meta)
+                for prof in active_profiles:
+                    render_profile_card(prof, show_image)
                 
-                # Generate hybrid answer
+                # Generate hybrid answer using original original query (but context is drawn from expanded search)
                 stream_generator = generate_hybrid_answer_stream(
                     query, scored_results,
                     model_name=model_choice, base_url=model_url, persona=persona_choice
@@ -1124,8 +1153,8 @@ else:
                         if idx < len(scored_results[:5]) - 1:
                             st.divider()
 
-            msg_meta = {"role": "assistant", "content": final_answer, "source": source_type}
-            if active_profile_meta:
-                msg_meta["profile_card"] = active_profile_meta
+            msg_meta = {"role": "assistant", "content": final_answer, "source": source_type, "show_image": show_image}
+            if active_profiles:
+                msg_meta["profile_cards"] = active_profiles
             st.session_state.messages.append(msg_meta)
             st.rerun()
