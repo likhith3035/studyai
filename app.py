@@ -321,11 +321,8 @@ def normalize_query(query):
     show_image = any(w in q_lower for w in ["pic", "pic ", "image", "photo", "show "])
     
     expansions = {
-        r"\bhod\b": "head of department",
-        r"\bcse\b": "computer science",
-        r"\bece\b": "electronics",
-        r"\bmech\b": "mechanical",
-        r"\bee\b": "electrical"
+        r"\bhod\b": "head of department"
+        # Removing drastic acronym expansions to prevent semantic drift
     }
     
     expanded = q_lower
@@ -1099,7 +1096,7 @@ else:
                 active_profiles = []
                 if scored_results:
                     for chunk, score in scored_results[:4]:
-                        if score >= 0.65 and isinstance(chunk, dict):
+                        if score >= 0.45 and isinstance(chunk, dict):
                             meta = chunk.get("metadata", {})
                             if any(k in meta for k in ["name", "image_url", "profile_url"]):
                                 dedup_key = meta.get("name") or meta.get("profile_url")
