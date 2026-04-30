@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  study-ai:
+    build: .
+    container_name: study-ai-app
+    ports:
+      - "8501:8501"
+    volumes:
+      # Mount the data folder so uploaded PDFs and index files persist between container restarts
+      - ./data:/app/data
+    environment:
+      # Optional environment configurations
+      - STREAMLIT_SERVER_MAX_UPLOAD_SIZE=50
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped

@@ -37,13 +37,10 @@ def load_all_documents():
         try:
             if file.lower().endswith('.pdf'):
                 with pdfplumber.open(file_path) as pdf:
-                    pdf_text = []
-                    for page in pdf.pages:
+                    for i, page in enumerate(pdf.pages):
                         page_text = page.extract_text()
                         if page_text:
-                            pdf_text.append(page_text)
-                    if pdf_text:
-                        docs.append({"text": "\n".join(pdf_text), "metadata": {"source": file}})
+                            docs.append({"text": page_text, "metadata": {"source": file, "page": i + 1}})
             
             elif file.lower().endswith('.json'):
                 with open(file_path, 'r', encoding='utf-8') as f:

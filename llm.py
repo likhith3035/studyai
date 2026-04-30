@@ -1,9 +1,20 @@
 import requests
 import json
 
+# System prompt that makes small models behave more like ChatGPT/Gemini
+SYSTEM_PROMPT = (
+    "You are an exceptionally intelligent, knowledgeable, and articulate AI study assistant. "
+    "You have deep expertise across all academic subjects. "
+    "Always give thorough, well-structured, and accurate answers. "
+    "Use markdown formatting (headers, bullet points, bold text) to make your answers visually clear. "
+    "If you know the answer, provide it confidently and completely. "
+    "Never say 'I don't know' if the answer is common knowledge — always try your best."
+)
+
 def call_llm_stream(prompt, model_name, base_url):
     """
     Centralized helper to call different local LLM APIs (Ollama vs OpenAI/LM Studio).
+    Optimized for small models (Gemma 4B, Llama 8B, etc.) with tuned generation parameters.
     """
     # Auto-detect format based on port
     is_openai_format = ":1234" in base_url or "/v1" in base_url
@@ -14,11 +25,16 @@ def call_llm_stream(prompt, model_name, base_url):
             url = f"{base_url.rstrip('/')}/v1/chat/completions"
             payload = {
                 "model": model_name,
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt}
+                ],
                 "stream": True,
-                "temperature": 0.7
+                "temperature": 0.5,
+                "top_p": 0.9,
+                "repeat_penalty": 1.1
             }
-            response = requests.post(url, json=payload, stream=True, timeout=10)
+            response = requests.post(url, json=payload, stream=True, timeout=120)
             response.raise_for_status()
 
             for line in response.iter_lines():
@@ -39,9 +55,15 @@ def call_llm_stream(prompt, model_name, base_url):
             payload = {
                 "model": model_name,
                 "prompt": prompt,
-                "stream": True
+                "system": SYSTEM_PROMPT,
+                "stream": True,
+                "options": {
+                    "temperature": 0.5,
+                    "top_p": 0.9,
+                    "repeat_penalty": 1.1
+                }
             }
-            response = requests.post(url, json=payload, stream=True, timeout=10)
+            response = requests.post(url, json=payload, stream=True, timeout=120)
             response.raise_for_status()
 
             for line in response.iter_lines():
@@ -53,6 +75,43 @@ def call_llm_stream(prompt, model_name, base_url):
                         break
     except Exception as e:
         yield f"⚠️ LLM Connection Error ({base_url}): {str(e)}"
+
+def rewrite_query(query, chat_history, model_name="llama3", base_url="http://localhost:11434"):
+    """
+    Rewrites a follow-up query to be standalone by replacing pronouns/references with context from history.
+    """
+    if not chat_history or len(chat_history) < 2:
+        return query
+        
+    # Extract only the last 4 messages to preserve fast context
+    history_text = ""
+    for msg in chat_history[-5:-1]: # exclude current user query
+        role = "User" if msg["role"] == "user" else "Assistant"
+        # truncate wildly long assistant messages to keep rewriting fast
+        content = msg["content"][:300] + ("..." if len(msg["content"]) > 300 else "")
+        history_text += f"{role}: {content}\n"
+        
+    prompt = f"""Given the following conversation history and the user's follow-up question, rewrite the follow-up question to be a standalone question that can be understood without the conversation history. Do NOT answer the question, ONLY output the rewritten question. If the question is already clear, just return it exactly as is without any intro or outro.
+
+Conversation History:
+{history_text}
+
+Follow-up Question: {query}
+Rewritten Standalone Question:"""
+
+    stream = list(call_llm_stream(prompt, model_name, base_url))
+    rewritten = "".join(stream).strip()
+    
+    # Clean up common LLM chatting tropes
+    rewritten = rewritten.replace("Rewritten Standalone Question:", "").replace("Rewritten question:", "").strip()
+    if rewritten.startswith('"') and rewritten.endswith('"'):
+        rewritten = rewritten[1:-1]
+        
+    # Fallback in case of massive failure
+    if len(rewritten) > max(300, len(query) * 3) or not rewritten:
+        return query
+        
+    return rewritten
 
 def generate_answer_stream(query, context, model_name="llama3", base_url="http://localhost:11434", persona="Standard Tutor"):
     """Legacy function — kept for backward compatibility with quiz/summary modules."""
@@ -141,9 +200,11 @@ def generate_hybrid_answer_stream(query, scored_results, model_name="llama3", ba
         prompt = f"""
 {selected_persona}
 
-You are answering a student's question using VERIFIED college/institutional data.
-Answer the question based ONLY on the following retrieved college documents.
-Be clear, structured, and helpful. Do NOT add information that is not in the context.
+You are answering a student's question using retrieved college/institutional data as your PRIMARY source.
+Start by using the college data below to answer the question.
+If the college data fully answers the question, base your answer strictly on it.
+However, if the college data only partially covers the topic or does not directly answer the specific question asked, you MUST supplement with your own general knowledge to give a complete, accurate, and helpful answer.
+Always clearly prioritize the college data, but never leave a student without a proper answer just because the documents are incomplete.
 
 College Data Context:
 {context}
@@ -152,7 +213,7 @@ Student's Question:
 {query}
 
 {format_clamp}
-Provide a clear, well-structured answer based on the college data above:
+Provide a clear, well-structured answer. Prioritize college data but supplement with your knowledge where needed:
 """
     
     elif source_type == "ai_generated":

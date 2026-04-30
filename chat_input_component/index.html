@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>ChatGPT Style Streamlit Input</title>
+    <!-- Streamlit Component Library -->
+    <!-- Removed faulty CDN script -->
+    <script>
+        // Inline Streamlit Component Protocol
+        const Streamlit = {
+            setComponentReady: function() {
+                window.parent.postMessage({
+                    isStreamlitMessage: true,
+                    type: "streamlit:componentReady",
+                    apiVersion: 1,
+                }, "*");
+            },
+            setFrameHeight: function(height) {
+                window.parent.postMessage({
+                    isStreamlitMessage: true,
+                    type: "streamlit:setFrameHeight",
+                    height: height,
+                }, "*");
+            },
+            setComponentValue: function(value) {
+                window.parent.postMessage({
+                    isStreamlitMessage: true,
+                    type: "streamlit:setComponentValue",
+                    value: value,
+                }, "*");
+            },
+            events: {
+                addEventListener: function(type, callback) {
+                    window.addEventListener("message", function(event) {
+                        if (event.data.type === "streamlit:render") {
+                            callback({ detail: event.data });
+                        }
+                    });
+                }
+            },
+            RENDER_EVENT: "streamlit:render"
+        };
+    </script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: transparent;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+
+        #chat-bar-container {
+            display: flex;
+            align-items: center;
+            background: #2b2b2b;
+            border-radius: 30px;
+            padding: 8px 16px;
+            width: 100%;
+            max-width: 800px;
+            box-sizing: border-box;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            transition: all 0.3s ease;
+        }
+
+        #chat-bar-container:focus-within {
+            border-color: rgba(255, 255, 255, 0.3);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+        }
+
+        input {
+            flex-grow: 1;
+            background: transparent;
+            border: none;
+            color: #ececec;
+            font-size: 16px;
+            outline: none;
+            padding: 8px;
+        }
+
+        input::placeholder {
+            color: #888;
+        }
+
+        .icon-btn {
+            background: none;
+            border: none;
+            color: #ccc;
+            cursor: pointer;
+            padding: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 50%;
+            transition: 0.2s;
+            outline: none;
+        }
+
+        .icon-btn:hover {
+            color: white;
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .send-btn {
+            background: white;
+            color: black;
+            margin-left: 8px;
+        }
+
+        .send-btn:hover {
+            background: #e0e0e0;
+            color: black;
+        }
+
+        .send-btn:disabled {
+            background: #555;
+            color: #888;
+            cursor: not-allowed;
+        }
+
+        .recording {
+            color: #ef4444; /* red */
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.1); text-shadow: 0 0 10px rgba(239, 68, 68, 0.5); }
+            100% { transform: scale(1); }
+        }
+
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+
+    <div id="chat-bar-container">
+        <input type="text" id="chat-input" placeholder="Ask anything..." autocomplete="off">
+        
+        <!-- Microphone Button -->
+        <button class="icon-btn" id="mic-btn" title="Voice Input">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                <line x1="12" y1="19" x2="12" y2="23"></line>
+                <line x1="8" y1="23" x2="16" y2="23"></line>
+            </svg>
+        </button>
+
+        <!-- Send Button -->
+        <button class="icon-btn send-btn" id="send-btn" title="Send Message">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="22" y1="2" x2="11" y2="13"></line>
+                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+            </svg>
+        </button>
+    </div>
+
+    <script>
+        const input = document.getElementById("chat-input");
+        const sendBtn = document.getElementById("send-btn");
+        const micBtn = document.getElementById("mic-btn");
+
+        // Disable input based on args passed by python
+        function configureInput(args) {
+            if (args && args.disabled) {
+                input.disabled = true;
+                sendBtn.disabled = true;
+                micBtn.disabled = true;
+                input.placeholder = "Generating...";
+            } else {
+                input.disabled = false;
+                sendBtn.disabled = false;
+                micBtn.disabled = false;
+                input.placeholder = "Ask anything...";
+                input.focus();
+            }
+        }
+
+        // Web Speech API
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        let recognition = null;
+        let isRecording = false;
+
+        if (SpeechRecognition) {
+            recognition = new SpeechRecognition();
+            recognition.continuous = false; // Stop when the user stops talking
+            recognition.interimResults = false;
+            
+            recognition.onresult = (e) => {
+                const transcript = e.results[0][0].transcript;
+                input.value += (input.value ? " " : "") + transcript;
+                stopRecording();
+            };
+
+            recognition.onerror = (e) => {
+                console.error("Speech recognition error", e);
+                stopRecording();
+                if (e.error === 'not-allowed') {
+                    alert("Microphone access blocked. Please allow mic usage.");
+                } else {
+                    input.placeholder = "Voice input failed...";
+                    setTimeout(() => { if(!input.disabled) input.placeholder = "Ask anything..."; }, 2000);
+                }
+            };
+
+            recognition.onend = () => {
+                stopRecording();
+            };
+        } else {
+            console.warn("Speech recognition not supported in this browser.");
+            micBtn.classList.add("hidden");
+            input.placeholder = "Voice input not supported in this browser";
+            setTimeout(() => { input.placeholder = "Ask anything..."; }, 3000);
+        }
+
+        function startRecording() {
+            if (recognition && !isRecording) {
+                try {
+                    recognition.start();
+                    isRecording = true;
+                    micBtn.classList.add('recording');
+                    input.placeholder = "Listening...";
+                } catch (e) {
+                    console.error("Could not start recording", e);
+                }
+            }
+        }
+
+        function stopRecording() {
+            if (recognition && isRecording) {
+                try { recognition.stop(); } catch(e) {}
+                isRecording = false;
+                micBtn.classList.remove('recording');
+                if (!input.disabled) input.placeholder = "Ask anything...";
+            }
+        }
+
+        micBtn.onclick = () => {
+            if (!input.disabled) {
+                if (isRecording) stopRecording();
+                else startRecording();
+            }
+        };
+
+        function sendMessage() {
+            if (input.disabled) return;
+            const text = input.value.trim();
+            if (text) {
+                // Send value to Streamlit
+                Streamlit.setComponentValue(text);
+                input.value = ''; // clear locally
+                
+                // We send an empty value immediately after so hitting send again with 
+                // another message actually triggers python's component state change
+                // But normally this component will unmount/remount if placed inside a container
+            }
+        }
+
+        sendBtn.onclick = sendMessage;
+        
+        input.onkeypress = (e) => { 
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                sendMessage(); 
+            }
+        };
+
+        function onRender(event) {
+            const data = event.detail;
+            configureInput(data.args);
+            // Render perfectly height ~ 60px
+            Streamlit.setFrameHeight(70);
+            
+            // Auto-position the Streamlit iframe at the bottom of the screen
+            try {
+                const iframes = window.parent.document.querySelectorAll("iframe");
+                iframes.forEach(iframe => {
+                    if (iframe.contentWindow === window) {
+                        iframe.style.position = "fixed";
+                        iframe.style.bottom = "2rem";
+                        iframe.style.left = "50%";
+                        iframe.style.transform = "translateX(-50%)";
+                        iframe.style.width = "calc(100% - 3rem)";
+                        iframe.style.maxWidth = "800px";
+                        iframe.style.zIndex = "99999";
+                        iframe.style.border = "none";
+                    }
+                });
+                
+                // Add padding to the parent block-container so chat history doesn't go under it
+                const blockContainer = window.parent.document.querySelector('.main .block-container');
+                if (blockContainer) {
+                    blockContainer.style.paddingBottom = "120px";
+                }
+            } catch(e) {}
+        }
+
+        // Hook things up!
+        Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, onRender);
+        // Tell Streamlit we're ready
+        Streamlit.setComponentReady();
+        // Request initial render height
+        Streamlit.setFrameHeight(70);
+    </script>
+</body>
+</html>

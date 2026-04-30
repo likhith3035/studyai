@@ -25,11 +25,22 @@ def create_index(chunks):
 
     return index
 
+import re
+
+def compute_keyword_score(query, text):
+    query_words = set(w for w in re.findall(r'\b\w+\b', query.lower()) if len(w) > 2)
+    if not query_words:
+        return 0.0
+    
+    text_words = re.findall(r'\b\w+\b', text.lower())
+    match_count = sum(1 for w in query_words if w in text_words)
+    
+    return float(match_count / len(query_words))
+
 def search(query, index, chunks, k=5):
     """
-    Search for relevant chunks and return results with cosine similarity scores.
-    Returns: List of (chunk_dict, similarity_score) tuples, sorted by score descending.
-    Scores are 0.0 to 1.0 where 1.0 = perfect match.
+    Hybrid Search: Combines FAISS cosine similarity with Exact Keyword matching.
+    Returns: List of (chunk_dict, hybrid_score) tuples, sorted by score descending.
     """
     if not chunks or index is None:
         return []
@@ -38,16 +49,43 @@ def search(query, index, chunks, k=5):
     query_embedding = np.array(query_embedding).astype("float32")
     faiss.normalize_L2(query_embedding)
 
-    D, I = index.search(query_embedding, k)
+    # Fetch a wider pool (top 15) to re-rank
+    fetch_k = min(len(chunks), k * 3)
+    if fetch_k == 0:
+        return []
+        
+    D, I = index.search(query_embedding, fetch_k)
 
-    results = []
+    hybrid_results = []
+    
+    # Track indices we process so we don't duplicate
+    processed_indices = set()
+    
     for score, idx in zip(D[0], I[0]):
         if 0 <= idx < len(chunks):
-            # Clamp score to [0, 1] range
-            clamped_score = float(max(0.0, min(1.0, score)))
-            results.append((chunks[idx], clamped_score))
+            processed_indices.add(idx)
+            chunk = chunks[idx]
+            text = chunk["text"] if isinstance(chunk, dict) else chunk
+            
+            v_score = float(max(0.0, min(1.0, score)))
+            k_score = compute_keyword_score(query, text)
+            
+            # 70% Semantic, 30% Keyword
+            final_score = (v_score * 0.70) + (k_score * 0.30)
+            hybrid_results.append((chunk, final_score))
+            
+    # Also scan top purely keyword hits globally just in case vectors missed an acronym entirely
+    for idx, chunk in enumerate(chunks):
+        if idx not in processed_indices:
+            text = chunk["text"] if isinstance(chunk, dict) else chunk
+            k_score = compute_keyword_score(query, text)
+            if k_score > 0.5: # Only include if it's a very strong exact match
+                v_score = 0.15 # Baseline penalty for failing vector search
+                final_score = (v_score * 0.70) + (k_score * 0.30)
+                hybrid_results.append((chunk, final_score))
 
-    return results
+    hybrid_results.sort(key=lambda x: x[1], reverse=True)
+    return hybrid_results[:k]
 
 def search_legacy(query, index, chunks, k=3):
     """Legacy search that returns only chunk text (for backward compatibility with quiz/summary/etc)."""

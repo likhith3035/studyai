@@ -1,0 +1,25 @@
+# Virtual environments
+venv/
+.env
+.venv/
+env/
+
+# Git and dev setups
+.git/
+.gitignore
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Mac/System files
+.DS_Store
+
+# Do NOT ignore data folder as it stores the initial database
+# But ignore specific cache temp files if any
+*.tmp
+*.log
+
+# Streamlit specific
+.streamlit/credentials.toml

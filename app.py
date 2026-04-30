@@ -4,7 +4,7 @@ import re
 import streamlit.components.v1 as components
 from text_processor import chunk_text
 from rag_faiss import create_index, search, search_legacy
-from llm import generate_answer_stream, generate_hybrid_answer_stream, classify_relevance, basic_chat, generate_quiz_stream, generate_summary_stream, generate_flashcards_stream, generate_mindmap_stream, generate_cheatsheet_stream, generate_study_plan_stream, generate_quiz_evaluate_stream, generate_diagram_for_text_stream
+from llm import generate_answer_stream, generate_hybrid_answer_stream, classify_relevance, basic_chat, generate_quiz_stream, generate_summary_stream, generate_flashcards_stream, generate_mindmap_stream, generate_cheatsheet_stream, generate_study_plan_stream, generate_quiz_evaluate_stream, generate_diagram_for_text_stream, rewrite_query
 from utils import save_document, load_all_documents, list_documents, delete_document, get_document_metadata, get_document_preview
 import socket
 import urllib.parse
@@ -22,9 +22,19 @@ def get_network_ip():
         s.close()
     return IP
 
+from database import init_db, create_session, save_message, load_session_messages, list_sessions, delete_session, update_session_title, save_doc_metadata, get_doc_metadata_db, delete_doc_metadata
+init_db()
+
 
 # ---------------- CONFIG ---------------- #
 st.set_page_config(page_title="Study AI: Premium RAG", page_icon="🤖", layout="wide")
+
+# Custom ChatGPT Style Chat Bar Component
+try:
+    custom_chat_bar = components.declare_component("chat_bar", path="chat_input_component")
+except Exception as e:
+    # Fallback if path changes or in deployment
+    custom_chat_bar = None
 
 # ---------------- CSS (🔥 STITCH AI: LUMINA ACADEMIC) ---------------- #
 st.markdown("""
@@ -318,10 +328,86 @@ hr {
 """, unsafe_allow_html=True)
 
 # ---------------- HELPERS ---------------- #
+from difflib import get_close_matches
+
+# ============================================================
+# DEPARTMENT NORMALIZATION ENGINE
+# ============================================================
+# Canonical name -> all known variations (abbreviations, shorthands, common misspellings)
+DEPARTMENT_SYNONYMS = {
+    "computer science and engineering": [
+        "cse", "cs", "computer science", "computer engineering", "comp sci",
+        "comp science", "computer sci", "compsci", "comp eng",
+        "computer science engineering", "computer science and engineering",
+    ],
+    "artificial intelligence and data science": [
+        "ai", "ds", "aids", "ai&ds", "ai & ds", "ai and ds", "ai ds",
+        "artificial intelligence", "data science", "aiandds", "ai&ml",
+        "artificial intelligence and data science", "ai data science",
+    ],
+    "electronics and communication engineering": [
+        "ece", "electronics", "electronics engineering", "electronics communication",
+        "electronics and communication", "electronics & communication",
+        "electronic communication", "ec", "e&c", "e and c",
+        "electronics and communication engineering",
+    ],
+    "electrical and electronics engineering": [
+        "eee", "electrical", "electrical engineering", "electrical eng",
+        "electrical electronics", "electrical and electronics",
+        "electrical & electronics", "ee",
+        "electrical and electronics engineering",
+    ],
+    "mechanical engineering": [
+        "me", "mechanical", "mech", "mech eng", "mech engineering",
+        "mechanical eng", "mechanical engineering",
+    ],
+    "civil engineering": [
+        "ce", "civil", "civil eng", "civil engineering",
+    ],
+    "information technology": [
+        "it", "info tech", "information technology", "infotech",
+    ],
+}
+
+# Build a flat lookup: variation -> canonical name
+_DEPT_LOOKUP = {}
+_ALL_DEPT_VARIATIONS = []
+for canonical, variations in DEPARTMENT_SYNONYMS.items():
+    for v in variations:
+        _DEPT_LOOKUP[v] = canonical
+    _ALL_DEPT_VARIATIONS.extend(variations)
+
+# Role keyword expansions
+ROLE_EXPANSIONS = {
+    r"\bhod\b": "head of department",
+    r"\bprincipal\b": "principal",
+    r"\bdean\b": "dean",
+    r"\bvp\b": "vice principal",
+    r"\bprof\b": "professor",
+}
+
+def _fuzzy_match_department(text):
+    """
+    Try to fuzzy-match a messy input against known department variations.
+    Uses difflib for typo tolerance (e.g. 'ecrotoinics communicatoinn' -> 'electronics communication').
+    """
+    # Try exact match first
+    if text in _DEPT_LOOKUP:
+        return _DEPT_LOOKUP[text]
+    
+    # Try fuzzy matching against all known variations
+    matches = get_close_matches(text, _ALL_DEPT_VARIATIONS, n=1, cutoff=0.55)
+    if matches:
+        return _DEPT_LOOKUP[matches[0]]
+    
+    return None
+
 def normalize_query(query):
     # Strip basic punctuation that can disrupt embedding geometry
     clean_query = re.sub(r'["\',?!]', '', query)
-    q_lower = clean_query.lower()
+    q_lower = clean_query.lower().strip()
+    q_lower = re.sub(r'\s+', ' ', q_lower)  # collapse multiple spaces
+    
     show_image = any(w in q_lower for w in ["pic", "pic ", "image", "photo", "show "])
     is_plural = any(w in q_lower for w in ["faculty", "professors", "teachers", "staff", "list", "all"])
     
@@ -331,14 +417,67 @@ def normalize_query(query):
     elif is_plural:
         intent_type = "list"
     
-    expansions = {
-        r"\bhod\b": "head of department"
-        # Removing drastic acronym expansions to prevent semantic drift
-    }
-    
+    # ---- PHASE 1: Multi-word phrase matching (longest match first) ----
     expanded = q_lower
-    for k, v in expansions.items():
-        expanded = re.sub(k, v, expanded)
+    sorted_variations = sorted(_ALL_DEPT_VARIATIONS, key=len, reverse=True)
+    for variation in sorted_variations:
+        if len(variation) > 3 and variation in expanded:
+            canonical = _DEPT_LOOKUP[variation]
+            expanded = expanded.replace(variation, canonical)
+            break  # Only replace the first department match to avoid double-expansion
+    
+    # ---- PHASE 2: Single-word abbreviation matching ----
+    words = expanded.split()
+    new_words = []
+    i = 0
+    while i < len(words):
+        # Try 3-word, 2-word, then 1-word combos
+        matched = False
+        for window in [3, 2]:
+            if i + window <= len(words):
+                phrase = " ".join(words[i:i+window])
+                canonical = _fuzzy_match_department(phrase)
+                if canonical:
+                    new_words.append(canonical)
+                    i += window
+                    matched = True
+                    break
+        
+        if not matched:
+            word = words[i]
+            canonical = _fuzzy_match_department(word)
+            if canonical and word not in ["me", "it"]:  # Skip ambiguous 2-letter words unless context is clear
+                new_words.append(canonical)
+            elif word in ["me", "it"]:
+                # Only expand "me"/"it" if adjacent to academic words
+                academic_context = any(w in words for w in ["hod", "head", "faculty", "department", "dept", "professor", "staff", "engineering", "branch"])
+                if academic_context:
+                    canonical = _fuzzy_match_department(word)
+                    if canonical:
+                        new_words.append(canonical)
+                    else:
+                        new_words.append(word)
+                else:
+                    new_words.append(word)
+            else:
+                new_words.append(word)
+            i += 1
+    
+    expanded = " ".join(new_words)
+    
+    # ---- PHASE 3: Fuzzy fallback for remaining unmatched chunks ----
+    # Check if the entire expanded query (minus common words) needs fuzzy correction
+    stop_words = {"who", "is", "the", "of", "and", "a", "an", "about", "tell", "me", "show", "what", "give", "hod", "head", "department", "faculty", "professor", "staff"}
+    remaining_words = [w for w in expanded.split() if w not in stop_words and len(w) > 2]
+    if remaining_words:
+        remaining_chunk = " ".join(remaining_words)
+        fuzzy_canonical = _fuzzy_match_department(remaining_chunk)
+        if fuzzy_canonical and fuzzy_canonical not in expanded:
+            expanded = expanded + " " + fuzzy_canonical
+    
+    # ---- PHASE 4: Role keyword expansion ----
+    for pattern, replacement in ROLE_EXPANSIONS.items():
+        expanded = re.sub(pattern, replacement, expanded)
         
     return expanded, show_image, is_plural, intent_type
 
@@ -554,9 +693,35 @@ with st.sidebar:
     st.divider()
     mode = st.radio("App Mode", ["💬 User Chat", "📝 Quiz Generator", "📚 Master Summary", "🗂️ Flashcard Center", "🧠 Mind Map Explorer", "📊 Cheat Sheet", "📅 Study Planner", "🛠️ Admin Space"])
 
-    if st.button("🧹 Clear Chat History", use_container_width=True):
+    st.subheader("📚 Chat Sessions")
+    
+    # Initialize session id if missing
+    if "current_session_id" not in st.session_state:
+        st.session_state["current_session_id"] = create_session("New Chat")
+        
+    db_sessions = list_sessions()
+    
+    if st.button("➕ New Chat Session", use_container_width=True):
+        st.session_state["current_session_id"] = create_session("New Chat")
         st.session_state.messages = []
         st.rerun()
+        
+    for s in db_sessions:
+        cols = st.columns([4, 1])
+        # Mark active session visually
+        icon = "🟢" if st.session_state["current_session_id"] == s['id'] else "💬"
+        if cols[0].button(f"{icon} {s['title']}", key=f"sess_{s['id']}", use_container_width=True):
+            st.session_state["current_session_id"] = s['id']
+            st.session_state.messages = load_session_messages(s['id'])
+            st.rerun()
+        if cols[1].button("🗑", key=f"del_{s['id']}", use_container_width=True):
+            delete_session(s['id'])
+            if st.session_state["current_session_id"] == s['id']:
+                st.session_state["current_session_id"] = create_session("New Chat")
+                st.session_state.messages = []
+            st.rerun()
+    
+    st.markdown("<br>", unsafe_allow_html=True)
 
     if st.button("🔄 Reload Data Index", use_container_width=True):
         st.cache_resource.clear()
@@ -645,18 +810,20 @@ if mode == "🛠️ Admin Space":
     st.subheader("📝 Raw JSON Ingestion")
     st.caption("Paste structured JSON arrays to manually inject specific college knowledge (e.g., faculty names, lab hours, rules).")
     
+    json_data_name = st.text_input("💎 Data Name", value="", placeholder="e.g., CSE Faculty, Lab Info")
     json_example = '''[
   {
     "text": "Dr Rajasekhar Reddy A is the Head of the CSE department.",
     "metadata": { "type": "faculty", "name": "Rajasekhar Reddy A", "role": "HOD" }
   }
 ]'''
-    
     raw_json_input = st.text_area("JSON Input", value="", placeholder=json_example, height=200)
     
     if st.button("🚀 Ingest JSON Data", use_container_width=True):
         if not raw_json_input.strip():
             st.error("❌ Input cannot be empty.")
+        elif not json_data_name.strip():
+            st.error("❌ Please provide a name for this data.")
         else:
             try:
                 import json
@@ -677,14 +844,18 @@ if mode == "🛠️ Admin Space":
                         import os
                         os.makedirs("data", exist_ok=True)
                         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                        filename = f"knowledge_drop_{timestamp}.json"
+                        filename = f"knowledge_{timestamp}.json"
                         filepath = os.path.join("data", filename)
                         
                         with open(filepath, "w", encoding="utf-8") as f:
                             json.dump(parsed_data, f, indent=2)
                         
-                        st.success(f"✅ Successfully ingested {len(parsed_data)} knowledge items! Saved as {filename}.")
+                        # Save custom title to database
+                        save_doc_metadata(filename, json_data_name.strip())
+                        
+                        st.success(f"✅ Successfully ingested '{json_data_name}'! Saved as {filename}.")
                         st.cache_resource.clear()
+                        st.session_state["edit_mode"] = None # Reset edit mode
                         st.rerun()
             except json.JSONDecodeError as e:
                 st.error(f"❌ Invalid JSON format: {str(e)}")
@@ -735,20 +906,51 @@ if mode == "🛠️ Admin Space":
                 icon = "📄" if meta["file_type"] == "pdf" else "🧩" if meta["file_type"] == "json" else "📝"
                 chunks_in_file = chunk_counts.get(doc, 0)
                 
-                with st.expander(f"{icon} {doc}"):
-                    st.caption(f"**Uploaded:** {time_str}  •  **Chunks Index:** {chunks_in_file}")
+                display_name = get_doc_metadata_db(doc) or doc
+                with st.expander(f"{icon} {display_name}"):
+                    st.caption(f"**File:** `{doc}`  •  **Uploaded:** {time_str}  •  **Chunks Index:** {chunks_in_file}")
                     
-                    preview = get_document_preview(doc)
-                    if meta["file_type"] == "json" and isinstance(preview, (dict, list)):
-                        st.json(preview)
+                    # Edit Logic
+                    if meta["file_type"] == "json":
+                        if st.session_state.get("edit_mode") == doc:
+                            import json
+                            current_val = get_document_preview(doc)
+                            edited_json = st.text_area(f"Edit {display_name}", value=json.dumps(current_val, indent=2), height=300)
+                            ec1, ec2 = st.columns(2)
+                            if ec1.button("💾 Save Changes", key=f"save_{doc}"):
+                                try:
+                                    updated_data = json.loads(edited_json)
+                                    with open(meta["file_path"], "w", encoding="utf-8") as f:
+                                        json.dump(updated_data, f, indent=2)
+                                    st.success("✅ Updated successfully!")
+                                    st.cache_resource.clear()
+                                    st.session_state["edit_mode"] = None
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"❌ Save error: {e}")
+                            if ec2.button("🚫 Cancel", key=f"cancel_{doc}"):
+                                st.session_state["edit_mode"] = None
+                                st.rerun()
+                        else:
+                            col_btns = st.columns([1, 1])
+                            if col_btns[0].button("✏️ Edit", key=f"edit_btn_{doc}"):
+                                st.session_state["edit_mode"] = doc
+                                st.rerun()
+                            if col_btns[1].button("🗑️ Delete", key=f"del_{doc}"):
+                                if delete_document(doc):
+                                    delete_doc_metadata(doc)
+                                    st.success(f"Deleted {doc}")
+                                    st.cache_resource.clear()
+                                    st.rerun()
                     else:
+                        preview = get_document_preview(doc)
                         st.text_area("Preview (First 2000 chars)", value=str(preview), height=200, disabled=True)
-                        
-                    if st.button("🗑️ Delete", key=f"del_{doc}"):
-                        if delete_document(doc):
-                            st.success(f"Deleted {doc}")
-                            st.cache_resource.clear()
-                            st.rerun()
+                        if st.button("🗑️ Delete", key=f"del_{doc}"):
+                            if delete_document(doc):
+                                delete_doc_metadata(doc)
+                                st.success(f"Deleted {doc}")
+                                st.cache_resource.clear()
+                                st.rerun()
             st.divider()
             if st.button("🗑️ Delete All Documents", use_container_width=True):
                 for doc in docs:
@@ -1026,219 +1228,378 @@ else:
     with colB:
         persona_choice = st.selectbox("🎭 Tutor Persona", ["Standard Tutor", "Explain Like I'm 5 (ELI5)", "PhD Level", "Analogy Mode"], index=0)
 
+    if "current_session_id" not in st.session_state:
+        st.session_state["current_session_id"] = create_session("New Chat")
+        
     if "messages" not in st.session_state:
-        st.session_state.messages = []
+        st.session_state.messages = load_session_messages(st.session_state["current_session_id"])
+        
+    if "generating" not in st.session_state:
+        st.session_state["generating"] = False
+    if "stop" not in st.session_state:
+        st.session_state["stop"] = False
 
     chunks, index = load_rag()
     has_docs = bool(chunks)
     if not has_docs:
         st.info("💡 No college documents uploaded yet. I'll answer using AI knowledge. Upload PDFs in Admin Space for college-specific answers.")
 
-    # Display Chat History
-    for i, msg in enumerate(st.session_state.messages):
-        with st.chat_message(msg["role"]):
-            if "profile_cards" in msg and msg["profile_cards"]:
-                for p in msg["profile_cards"]:
-                    render_profile_card(p, msg.get("show_image", False))
-            elif "profile_card" in msg and msg["profile_card"]: # backwards compat
-                render_profile_card(msg["profile_card"], msg.get("show_image", False))
-                
-            st.markdown(msg["content"])
-            if msg.get("tableJSON") is not None:
-                st.table(pd.read_json(io.StringIO(msg["tableJSON"])))
+    chat_container = st.container()
+    input_container = st.container()
+
+    with input_container:
+        if st.session_state.get("generating", False):
+            # Centered stop button
+            stop_col1, stop_col2, stop_col3 = st.columns([1, 2, 1])
+            with stop_col2:
+                if st.button("⛔ Stop Generation", key="stop_generating", use_container_width=True):
+                    st.session_state["stop"] = True
+                    st.session_state["generating"] = False
+                    st.rerun()
+
+        disabled = st.session_state.get("generating", False)
+        
+        if custom_chat_bar is not None:
+            # Render custom chat bar, linking it to the length of messages so it clears naturally upon send
+            user_input_key = f"chat_bar_{len(st.session_state.messages)}"
+            user_input = custom_chat_bar(disabled=disabled, key=user_input_key)
+        else:
+            # Fallback if component fails to load
+            user_input = st.chat_input("Ask anything...", disabled=disabled)
+        
+        if user_input and str(user_input).strip():
+            if len(st.session_state.messages) == 0:
+                update_session_title(st.session_state["current_session_id"], str(user_input).strip()[:30] + "...")
+            st.session_state["generating"] = True
+            st.session_state["stop"] = False
+            msg_content = str(user_input).strip()
+            st.session_state.messages.append({"role": "user", "content": msg_content})
+            save_message(st.session_state["current_session_id"], "user", msg_content)
+            st.rerun()
+
+    with chat_container:
+        needs_generation = st.session_state.get("generating", False) and st.session_state.messages and st.session_state.messages[-1]["role"] == "user"
+
+        if needs_generation:
+            query = st.session_state.messages[-1]["content"]
             
-            # Mermaid diagrams
-            mermaid_matches = list(re.finditer(r'```mermaid\n(.*?)\n```', msg.get("content", ""), re.DOTALL))
-            has_embedded_mermaid = len(mermaid_matches) > 0
+            # Context Memory: Rewrite the query using conversation history
+            if len(st.session_state.messages) > 2:
+                original_query = query
+                with st.spinner("Refining context..."):
+                    query = rewrite_query(
+                        query=original_query,
+                        chat_history=st.session_state.messages,
+                        model_name=model_choice,
+                        base_url=model_url
+                    )
+
+            expanded_query, show_image, is_plural, intent_type = normalize_query(query)
             
-            for m_match in mermaid_matches:
-                render_mermaid(m_match.group(1))
-
-            if "diagram_code" in msg:
-                render_mermaid(msg["diagram_code"])
+            if has_docs:
+                scored_results = search(expanded_query, index, chunks)
+            else:
+                scored_results = []
             
-            # Source badge for history messages
-            if msg["role"] == "assistant" and "source" in msg:
-                src = msg["source"]
-                if src == "college_data":
-                    st.markdown(
-                        '<div style="display:inline-block; background:rgba(59,130,246,0.15); border:1px solid rgba(59,130,246,0.3); '
-                        'color:#60a5fa; padding:4px 14px; border-radius:20px; font-size:12px; margin-top:4px;">'
-                        '\U0001f3eb Based on College Data</div>',
-                        unsafe_allow_html=True
-                    )
-                elif src == "ai_generated":
-                    st.markdown(
-                        '<div style="display:inline-block; background:rgba(168,85,247,0.15); border:1px solid rgba(168,85,247,0.3); '
-                        'color:#c084fc; padding:4px 14px; border-radius:20px; font-size:12px; margin-top:4px;">'
-                        '\U0001f916 Generated by our AI for better understanding</div>',
-                        unsafe_allow_html=True
-                    )
-                else:
-                    st.markdown(
-                        '<div style="display:inline-block; background:rgba(45,212,191,0.15); border:1px solid rgba(45,212,191,0.3); '
-                        'color:#2dd4bf; padding:4px 14px; border-radius:20px; font-size:12px; margin-top:4px;">'
-                        '\U0001f500 College Data + AI Enhanced</div>',
-                        unsafe_allow_html=True
-                    )
-
-            # Action buttons for assistant messages
-            if msg["role"] == "assistant":
-                clean_text = re.sub(r'```mermaid.*?```', '', msg["content"], flags=re.DOTALL).strip()
-                vcol1, vcol2, ccol, dlcol, dcol, _ = st.columns([1, 1, 1, 1, 1.5, 1])
-                with vcol1:
-                    if st.button("\U0001f50a Read", key=f"voice_{i}"):
-                        clean_voice = re.sub(r'```mermaid.*?```', '', msg["content"], flags=re.DOTALL)
-                        speak_text(clean_voice)
-                with vcol2:
-                    if st.button("\U0001f507 Stop", key=f"stop_{i}"):
-                        stop_speech()
-                with ccol:
-                    if st.button("\U0001f4cb Copy", key=f"copy_{i}"):
-                        escaped = clean_text.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
-                        components.html(
-                            f"""<script>
-                            navigator.clipboard.writeText(`{escaped}`).then(() => {{}});
-                            </script>""",
-                            height=0, width=0
-                        )
-                        st.toast("\u2705 Copied to clipboard!", icon="\U0001f4cb")
-                with dlcol:
-                    st.download_button("\U0001f4e5 Save", data=clean_text, file_name=f"answer_{i}.txt", mime="text/plain", key=f"dl_{i}")
-                with dcol:
-                    if not has_embedded_mermaid and "diagram_code" not in msg:
-                        if st.button("\U0001f4ca Diagram", key=f"diag_{i}", use_container_width=True):
-                            with st.spinner("\U0001f916 Drawing diagram..."):
-                                diag_stream = list(generate_diagram_for_text_stream(msg["content"], model_name=model_choice, base_url=model_url))
-                                diag_text = "".join(diag_stream).strip()
-                                mermaid_match = re.search(r'```mermaid\s*\n(.*?)(?:```|$)', diag_text, re.DOTALL)
-                                if mermaid_match:
-                                    msg["diagram_code"] = mermaid_match.group(1).strip()
-                                elif diag_text.startswith("graph TD") or diag_text.startswith("flowchart") or diag_text.startswith("mindmap"):
-                                    msg["diagram_code"] = diag_text.replace("```", "").strip()
-                                else:
-                                    msg["diagram_code"] = "graph TD\nA[Error] --> B[Could not generate valid diagram]"
-                                st.rerun()
-
-    query = st.chat_input("Ask anything — college topics or general questions...")
-    
-    if query:
-        st.session_state.messages.append({"role": "user", "content": query})
-        with st.chat_message("user"):
-            st.markdown(query)
-
-        with st.chat_message("assistant"):
-            with st.spinner("🤖 Studying and thinking..."):
-                expanded_query, show_image, is_plural, intent_type = normalize_query(query)
+            source_type, high_chunks, all_chunks = classify_relevance(scored_results)
+            
+            active_profiles = []
+            if scored_results:
+                for chunk, score in scored_results[:4]:
+                    if score >= 0.25 and isinstance(chunk, dict):
+                        meta = chunk.get("metadata", {})
+                        if any(k in meta for k in ["name", "image_url", "profile_url"]):
+                            dedup_key = meta.get("name") or meta.get("profile_url")
+                            if not any((p.get("name") or p.get("profile_url")) == dedup_key for p in active_profiles):
+                                active_profiles.append(meta)
+            
+            if active_profiles and not is_plural:
+                # Use the already-normalized expanded_query for smarter word matching
+                query_words = set(re.sub(r'[^\w\s]', '', expanded_query).lower().split())
                 
-                # Get scored results from FAISS
-                if has_docs:
-                    scored_results = search(expanded_query, index, chunks)
-                else:
-                    scored_results = []
+                # Detect which canonical department the user is asking about using the global engine
+                query_canonical_dept = None
+                for word in query_words:
+                    matched = _fuzzy_match_department(word)
+                    if matched and word not in ["me", "it"]:
+                        query_canonical_dept = matched
+                        break
+                # Also try multi-word combos from the query
+                if not query_canonical_dept:
+                    query_text = " ".join(query_words)
+                    for variation in sorted(_ALL_DEPT_VARIATIONS, key=len, reverse=True):
+                        if len(variation) > 3 and variation in query_text:
+                            query_canonical_dept = _DEPT_LOOKUP[variation]
+                            break
                 
-                # Classify relevance
-                source_type, high_chunks, all_chunks = classify_relevance(scored_results)
-                
-                # Check for metadata across top hits
-                active_profiles = []
-                if scored_results:
-                    for chunk, score in scored_results[:4]:
-                        if score >= 0.25 and isinstance(chunk, dict):
-                            meta = chunk.get("metadata", {})
-                            if any(k in meta for k in ["name", "image_url", "profile_url"]):
-                                dedup_key = meta.get("name") or meta.get("profile_url")
-                                if not any((p.get("name") or p.get("profile_url")) == dedup_key for p in active_profiles):
-                                    active_profiles.append(meta)
-                
-                # If singular identity requested, perform Lexical Re-Ranking (BM25-Lite) on top FAISS candidates
-                if active_profiles and not is_plural:
-                    query_words = set(re.sub(r'[^\w\s]', '', query).lower().split())
-                    best_match = active_profiles[0]
-                    max_overlap = -1
-                    
-                    for prof in active_profiles:
-                        prof_text = f"{prof.get('name','')} {prof.get('role','')} {prof.get('department','')} {prof.get('specialization','')} ".lower()
-                        prof_words = set(prof_text.split())
-                        
-                        overlap = len(query_words.intersection(prof_words))
-                        
-                        # Heavy lexical boost for vital hierarchy keywords
-                        if "hod" in query_words and ("hod" in prof.get("role", "").lower() or "head" in prof.get("role", "").lower()):
-                            overlap += 10
-                        if "principal" in query_words and "principal" in prof.get("role", "").lower():
-                            overlap += 10
-                        if "director" in query_words and "director" in prof.get("role", "").lower():
-                            overlap += 10
-                            
-                        if overlap > max_overlap:
-                            max_overlap = overlap
-                            best_match = prof
-                            
-                    active_profiles = [best_match]
+                best_match = None
+                max_overlap = -1
                 
                 for prof in active_profiles:
-                    render_profile_card(prof, show_image)
+                    prof_dept = prof.get('department', '').lower()
+                    prof_text = f"{prof.get('name','')} {prof.get('role','')} {prof.get('department','')} {prof.get('specialization','')} ".lower()
+                    prof_words = set(prof_text.split())
+                    
+                    overlap = len(query_words.intersection(prof_words))
+                    
+                    # Department match via canonical engine
+                    if query_canonical_dept:
+                        # Resolve the profile's department to canonical form too
+                        prof_canonical_dept = _fuzzy_match_department(prof_dept) or prof_dept
+                        # Also check each word of the profile dept
+                        if not prof_canonical_dept or prof_canonical_dept == prof_dept:
+                            for pw in prof_dept.split():
+                                m = _fuzzy_match_department(pw)
+                                if m:
+                                    prof_canonical_dept = m
+                                    break
+                        
+                        if prof_canonical_dept == query_canonical_dept:
+                            overlap += 20  # Strong match
+                        else:
+                            overlap -= 15  # Wrong department penalty
+                    
+                    # Role-specific bonuses
+                    if any(w in query_words for w in ["hod", "head", "department"]) and ("hod" in prof.get("role", "").lower() or "head" in prof.get("role", "").lower()):
+                        overlap += 10
+                    if "principal" in query_words and "principal" in prof.get("role", "").lower():
+                        overlap += 10
+                    if "director" in query_words and "director" in prof.get("role", "").lower():
+                        overlap += 10
+                        
+                    if overlap > max_overlap:
+                        max_overlap = overlap
+                        best_match = prof
+                        
+                if max_overlap > 0 and best_match:
+                    active_profiles = [best_match]
+                else:
+                    active_profiles = []
+            
+            msg_meta = {
+                "role": "assistant",
+                "content": "",
+                "source": source_type,
+                "show_image": show_image
+            }
+            if active_profiles:
+                msg_meta["profile_cards"] = active_profiles
+            if scored_results:
+                msg_meta["scored_results"] = scored_results[:5]
+            st.session_state.messages.append(msg_meta)
+
+        # Display Chat History
+        for i, msg in enumerate(st.session_state.messages):
+            if needs_generation and i == len(st.session_state.messages) - 1:
+                continue
+
+            with st.chat_message(msg["role"]):
+                if "profile_cards" in msg and msg["profile_cards"]:
+                    for p in msg["profile_cards"]:
+                        render_profile_card(p, msg.get("show_image", False))
+                elif "profile_card" in msg and msg["profile_card"]: # backwards compat
+                    render_profile_card(msg["profile_card"], msg.get("show_image", False))
+                    
+                st.markdown(msg["content"])
+                if msg.get("tableJSON") is not None:
+                    st.table(pd.read_json(io.StringIO(msg["tableJSON"])))
                 
-                # Generate hybrid answer using original query
+                mermaid_matches = list(re.finditer(r'```mermaid\n(.*?)\n```', msg.get("content", ""), re.DOTALL))
+                has_embedded_mermaid = len(mermaid_matches) > 0
+                
+                for m_match in mermaid_matches:
+                    render_mermaid(m_match.group(1))
+
+                if "diagram_code" in msg:
+                    render_mermaid(msg["diagram_code"])
+                
+                if msg["role"] == "assistant" and "source" in msg:
+                    src = msg["source"]
+                    if src == "college_data":
+                        st.markdown(
+                            '<div style="display:inline-block; background:rgba(59,130,246,0.15); border:1px solid rgba(59,130,246,0.3); '
+                            'color:#60a5fa; padding:4px 14px; border-radius:20px; font-size:12px; margin-top:4px;">'
+                            '\U0001f3eb Based on College Data</div>',
+                            unsafe_allow_html=True
+                        )
+                    elif src == "ai_generated":
+                        st.markdown(
+                            '<div style="display:inline-block; background:rgba(168,85,247,0.15); border:1px solid rgba(168,85,247,0.3); '
+                            'color:#c084fc; padding:4px 14px; border-radius:20px; font-size:12px; margin-top:4px;">'
+                            '\U0001f916 Generated by our AI for better understanding</div>',
+                            unsafe_allow_html=True
+                        )
+                    else:
+                        st.markdown(
+                            '<div style="display:inline-block; background:rgba(45,212,191,0.15); border:1px solid rgba(45,212,191,0.3); '
+                            'color:#2dd4bf; padding:4px 14px; border-radius:20px; font-size:12px; margin-top:4px;">'
+                            '\U0001f500 College Data + AI Enhanced</div>',
+                            unsafe_allow_html=True
+                        )
+
+                if msg["role"] == "assistant" and msg.get("scored_results"):
+                    with st.expander("📎 Source Context (" + str(len(msg["scored_results"])) + " segments found)"):
+                        for idx, (chunk, score) in enumerate(msg["scored_results"]):
+                            score_pct = round(score * 100)
+                            score_color = "#22c55e" if score >= 0.7 else "#f59e0b" if score >= 0.4 else "#ef4444"
+                            
+                            meta = chunk.get("metadata", {}) if isinstance(chunk, dict) else {}
+                            src_name = meta.get("source", "Unknown Source")
+                            src_page = meta.get("page", None)
+                            page_str = f", pg {src_page}" if src_page else ""
+                            
+                            st.markdown(
+                                f'**Segment {idx+1} ({src_name}{page_str})** — <span style="color:{score_color}; font-weight:600;">{score_pct}% match</span>',
+                                unsafe_allow_html=True
+                            )
+                            st.markdown(chunk.get("text", "") if isinstance(chunk, dict) else chunk)
+                            if idx < len(msg["scored_results"]) - 1:
+                                st.divider()
+
+                if msg["role"] == "assistant":
+                    clean_text = re.sub(r'```mermaid.*?```', '', msg["content"], flags=re.DOTALL).strip()
+                    vcol1, vcol2, ccol, dlcol, dcol, _ = st.columns([1, 1, 1, 1, 1.5, 1])
+                    with vcol1:
+                        if st.button("\U0001f50a Read", key=f"voice_{i}"):
+                            clean_voice = re.sub(r'```mermaid.*?```', '', msg["content"], flags=re.DOTALL)
+                            speak_text(clean_voice)
+                    with vcol2:
+                        if st.button("\U0001f507 Stop", key=f"stop_voice_{i}"):
+                            stop_speech()
+                    with ccol:
+                        if st.button("\U0001f4cb Copy", key=f"copy_{i}"):
+                            escaped = clean_text.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
+                            components.html(
+                                f"""<script>
+                                navigator.clipboard.writeText(`{escaped}`).then(() => {{}});
+                                </script>""",
+                                height=0, width=0
+                            )
+                            st.toast("\u2705 Copied to clipboard!", icon="\U0001f4cb")
+                    with dlcol:
+                        st.download_button("\U0001f4e5 Save", data=clean_text, file_name=f"answer_{i}.txt", mime="text/plain", key=f"dl_{i}")
+                    with dcol:
+                        if not has_embedded_mermaid and "diagram_code" not in msg:
+                            if st.button("\U0001f4ca Diagram", key=f"diag_{i}", use_container_width=True):
+                                with st.spinner("\U0001f916 Drawing diagram..."):
+                                    diag_stream = list(generate_diagram_for_text_stream(msg["content"], model_name=model_choice, base_url=model_url))
+                                    diag_text = "".join(diag_stream).strip()
+                                    mermaid_match = re.search(r'```mermaid\s*\n(.*?)(?:```|$)', diag_text, re.DOTALL)
+                                    if mermaid_match:
+                                        msg["diagram_code"] = mermaid_match.group(1).strip()
+                                    elif diag_text.startswith("graph TD") or diag_text.startswith("flowchart") or diag_text.startswith("mindmap"):
+                                        msg["diagram_code"] = diag_text.replace("```", "").strip()
+                                    else:
+                                        msg["diagram_code"] = "graph TD\nA[Error] --> B[Could not generate valid diagram]"
+                                    st.rerun()
+
+        if needs_generation:
+            with st.chat_message("assistant"):
+                for prof in active_profiles:
+                    render_profile_card(prof, show_image)
+                    
+                # Animated CSS thinking indicator
+                thinking_html = """
+                <div style="display: flex; align-items: center; gap: 6px; padding: 12px 0px; color: #60a5fa;">
+                    <div style="width: 8px; height: 8px; background-color: #3b82f6; border-radius: 50%; animation: ping 1.4s cubic-bezier(0, 0, 0.2, 1) infinite;"></div>
+                    <div style="width: 8px; height: 8px; background-color: #3b82f6; border-radius: 50%; animation: ping 1.4s cubic-bezier(0, 0, 0.2, 1) infinite; animation-delay: 0.2s;"></div>
+                    <div style="width: 8px; height: 8px; background-color: #3b82f6; border-radius: 50%; animation: ping 1.4s cubic-bezier(0, 0, 0.2, 1) infinite; animation-delay: 0.4s;"></div>
+                    <span style="font-size: 14px; font-weight: 500; margin-left: 4px; animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;">Synthesizing answer...</span>
+                    <style>
+                        @keyframes ping { 75%, 100% { transform: scale(2); opacity: 0; } }
+                        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
+                    </style>
+                </div>
+                """
+                placeholder = st.empty()
+                placeholder.markdown(thinking_html, unsafe_allow_html=True)
+                        
                 stream_generator = generate_hybrid_answer_stream(
                     query, scored_results,
                     model_name=model_choice, base_url=model_url, persona=persona_choice,
                     intent_type=intent_type
                 )
                 
-                # If table logic is required, we cannot natively stream the raw table while building pandas
+                # We do not redeclare placeholder here, we overwrite the previous CSS loading one
+                response = ""
+                df = None
+                
                 if intent_type == "table":
-                    full_text = "".join(stream_generator)
-                    df, remaining_text = extract_and_parse_markdown_table(full_text)
-                    st.markdown(remaining_text)
+                    for chunk in stream_generator:
+                        if st.session_state.get("stop", False):
+                            break
+                        response += chunk
+                        st.session_state.messages[-1]["content"] = response
+                        placeholder.markdown(response + "▌")
+                    
+                    df, remaining_text = extract_and_parse_markdown_table(response)
+                    placeholder.markdown(remaining_text)
+                    st.session_state.messages[-1]["content"] = remaining_text
+                    
                     if df is not None:
                         st.table(df)
-                    final_answer = remaining_text
+                        st.session_state.messages[-1]["tableJSON"] = df.to_json()
                 else:
-                    final_answer = st.write_stream(stream_generator)
-            
-            # Source Badge
-            if source_type == "college_data":
-                st.markdown(
-                    '<div style="display:inline-block; background:rgba(59,130,246,0.15); border:1px solid rgba(59,130,246,0.3); '
-                    'color:#60a5fa; padding:4px 14px; border-radius:20px; font-size:12px; margin-top:8px;">'
-                    '🏫 Based on College Data</div>',
-                    unsafe_allow_html=True
-                )
-            elif source_type == "ai_generated":
-                st.markdown(
-                    '<div style="display:inline-block; background:rgba(168,85,247,0.15); border:1px solid rgba(168,85,247,0.3); '
-                    'color:#c084fc; padding:4px 14px; border-radius:20px; font-size:12px; margin-top:8px;">'
-                    '🤖 Generated by our AI for better understanding</div>',
-                    unsafe_allow_html=True
-                )
-            else:
-                st.markdown(
-                    '<div style="display:inline-block; background:rgba(45,212,191,0.15); border:1px solid rgba(45,212,191,0.3); '
-                    'color:#2dd4bf; padding:4px 14px; border-radius:20px; font-size:12px; margin-top:8px;">'
-                    '🔀 College Data + AI Enhanced</div>',
-                    unsafe_allow_html=True
-                )
-            
-            # Source Context with Relevance Scores
-            if scored_results:
-                with st.expander("📎 Source Context (" + str(len(scored_results[:5])) + " segments found)"):
-                    for idx, (chunk, score) in enumerate(scored_results[:5]):
-                        score_pct = round(score * 100)
-                        score_color = "#22c55e" if score >= 0.7 else "#f59e0b" if score >= 0.4 else "#ef4444"
-                        st.markdown(
-                            f'**Segment {idx+1}** — <span style="color:{score_color}; font-weight:600;">{score_pct}% match</span>',
-                            unsafe_allow_html=True
-                        )
-                        st.markdown(chunk.get("text", "") if isinstance(chunk, dict) else chunk)
-                        if idx < len(scored_results[:5]) - 1:
-                            st.divider()
+                    for chunk in stream_generator:
+                        if st.session_state.get("stop", False):
+                            break
+                        response += chunk
+                        st.session_state.messages[-1]["content"] = response
+                        placeholder.markdown(response + "▌")
+                    placeholder.markdown(response)
 
-            msg_meta = {"role": "assistant", "content": final_answer, "source": source_type, "show_image": show_image}
-            if active_profiles:
-                msg_meta["profile_cards"] = active_profiles
-            if intent_type == "table" and df is not None:
-                msg_meta["tableJSON"] = df.to_json()
-            st.session_state.messages.append(msg_meta)
+                if source_type == "college_data":
+                    st.markdown(
+                        '<div style="display:inline-block; background:rgba(59,130,246,0.15); border:1px solid rgba(59,130,246,0.3); '
+                        'color:#60a5fa; padding:4px 14px; border-radius:20px; font-size:12px; margin-top:8px;">'
+                        '\U0001f3eb Based on College Data</div>',
+                        unsafe_allow_html=True
+                    )
+                elif source_type == "ai_generated":
+                    st.markdown(
+                        '<div style="display:inline-block; background:rgba(168,85,247,0.15); border:1px solid rgba(168,85,247,0.3); '
+                        'color:#c084fc; padding:4px 14px; border-radius:20px; font-size:12px; margin-top:8px;">'
+                        '\U0001f916 Generated by our AI for better understanding</div>',
+                        unsafe_allow_html=True
+                    )
+                else:
+                    st.markdown(
+                        '<div style="display:inline-block; background:rgba(45,212,191,0.15); border:1px solid rgba(45,212,191,0.3); '
+                        'color:#2dd4bf; padding:4px 14px; border-radius:20px; font-size:12px; margin-top:8px;">'
+                        '\U0001f500 College Data + AI Enhanced</div>',
+                        unsafe_allow_html=True
+                    )
+
+                if scored_results:
+                    with st.expander("📎 Source Context (" + str(len(scored_results[:5])) + " segments found)"):
+                        for idx, (chunk, score) in enumerate(scored_results[:5]):
+                            score_pct = round(score * 100)
+                            score_color = "#22c55e" if score >= 0.7 else "#f59e0b" if score >= 0.4 else "#ef4444"
+                            
+                            meta = chunk.get("metadata", {}) if isinstance(chunk, dict) else {}
+                            src_name = meta.get("source", "Unknown Source")
+                            src_page = meta.get("page", None)
+                            page_str = f", pg {src_page}" if src_page else ""
+                            
+                            st.markdown(
+                                f'**Segment {idx+1} ({src_name}{page_str})** — <span style="color:{score_color}; font-weight:600;">{score_pct}% match</span>',
+                                unsafe_allow_html=True
+                            )
+                            st.markdown(chunk.get("text", "") if isinstance(chunk, dict) else chunk)
+                            if idx < len(scored_results[:5]) - 1:
+                                st.divider()
+                                    
+            st.session_state["generating"] = False
+            st.session_state["stop"] = False
+            
+            # Persist AI answer to DB
+            final_ai_msg = st.session_state.messages[-1]
+            meta_dict = {}
+            if "profile_cards" in final_ai_msg: meta_dict["profile_cards"] = final_ai_msg["profile_cards"]
+            if "source" in final_ai_msg: meta_dict["source"] = final_ai_msg["source"]
+            if "show_image" in final_ai_msg: meta_dict["show_image"] = final_ai_msg["show_image"]
+            if "tableJSON" in final_ai_msg: meta_dict["tableJSON"] = final_ai_msg["tableJSON"]
+            if "scored_results" in final_ai_msg: meta_dict["scored_results"] = final_ai_msg["scored_results"]
+            save_message(st.session_state["current_session_id"], "assistant", final_ai_msg.get("content", ""), meta_dict)
+            
             st.rerun()
